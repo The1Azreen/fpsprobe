@@ -2,6 +2,8 @@
 
 GPU-accelerated frame-rate, frame-time and HDR brightness analysis for captured gameplay video.
 
+> fpsprobe is a Rust rewrite based on [trdrop](https://github.com/cirquit/trdrop) by Alexander Isenko. See [Acknowledgements](#acknowledgements).
+
 fpsprobe is built for real-world console captures, such as HEVC recordings from an Elgato 4K X. These are compressed, so repeated frames are never bit-identical. Instead of counting a frame as new when any pixel changes, fpsprobe measures each video's own compression-noise floor and separates real motion from noise.
 
 <!-- MEDIA: uncomment once docs/media/demo-overlay.gif exists (see docs/media/README.md)
