@@ -4,6 +4,12 @@ GPU-accelerated frame-rate, frame-time and HDR brightness analysis for captured 
 
 fpsprobe is built for real-world console captures, such as HEVC recordings from an Elgato 4K X. These are compressed, so repeated frames are never bit-identical. Instead of counting a frame as new when any pixel changes, fpsprobe measures each video's own compression-noise floor and separates real motion from noise.
 
+<!-- MEDIA: uncomment once docs/media/demo-overlay.gif exists (see docs/media/README.md)
+<p align="center">
+  <img src="docs/media/demo-overlay.gif" width="900" alt="Gameplay with the fpsprobe FPS and frame-time overlay">
+</p>
+-->
+
 ## Features
 
 - **Frame rate and frame time** for compressed captures, with a noise-adaptive duplicate threshold.
@@ -14,7 +20,33 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
   - CSV with per-frame data
   - the video with the graphs on top (HDR sources stay HDR10)
   - the graphs alone as ProRes 4444 with transparency, for DaVinci Resolve and other editors
-- **GUI layout editor:** switch graphs on or off, then drag and resize them on a live preview. Layouts save to JSON and can be reused from the command line.
+- **GUI layout editor:** switch graphs on or off, then drag and resize them over a real frame of your video, chosen with a slider. Layouts save to JSON and can be reused from the command line.
+
+## Screenshots
+
+<!-- MEDIA: uncomment each image once its file exists in docs/media/ (see docs/media/README.md)
+
+### Layout editor
+<p align="center">
+  <img src="docs/media/gui-layout-editor.png" width="900" alt="fpsprobe GUI: graphs arranged over a frame of the video">
+</p>
+
+### Arranging graphs
+<p align="center">
+  <img src="docs/media/gui-drag-resize.gif" width="900" alt="Dragging and resizing graphs in the preview">
+</p>
+
+### HDR scopes
+<p align="center">
+  <img src="docs/media/hdr-scopes-grid.png" width="900" alt="RGB nits waveform, CIE chromaticity, L/R/G/B histogram and vectorscope">
+</p>
+
+### FPS and HDR overlay
+<p align="center">
+  <img src="docs/media/overlay-fps-hdr.png" width="900" alt="Exported video with FPS, frame-time and nits graphs">
+</p>
+
+-->
 
 ## Requirements
 
