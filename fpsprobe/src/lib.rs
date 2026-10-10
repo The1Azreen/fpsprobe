@@ -10,6 +10,7 @@ pub mod export;
 mod gpu;
 pub mod layout;
 pub mod nits;
+pub mod preview;
 pub mod progress;
 pub mod render;
 pub mod video;

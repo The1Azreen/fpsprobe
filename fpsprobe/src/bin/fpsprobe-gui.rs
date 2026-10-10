@@ -7,6 +7,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use fpsprobe::canvas::{Canvas, FrameData};
 use fpsprobe::export::{self, ExportJob, ExportReport};
 use fpsprobe::layout::{Layout, Widget};
+use fpsprobe::preview::FrameGrabber;
 use fpsprobe::nits::{HIST_BINS, NitsFrame, ScopeData, WAVE_COLS, WAVE_ROWS, XY_BINS};
 use fpsprobe::progress::Progress;
 use fpsprobe::render::fps_series;
@@ -18,7 +19,8 @@ use std::thread::JoinHandle;
 
 /// Longest side of the preview image; the layout is resolution independent.
 const PREVIEW_MAX_W: usize = 1280;
-const GRAPH_SIZES: [(usize, usize); 4] = [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
+const GRAPH_SIZES: [(&str, (usize, usize)); 4] =
+    [("4K", (3840, 2160)), ("1440p", (2560, 1440)), ("1080p", (1920, 1080)), ("720p", (1280, 720))];
 const HWACCELS: [&str; 5] = ["d3d11va", "cuda", "qsv", "vulkan", "none"];
 
 fn main() -> eframe::Result {
@@ -110,13 +112,20 @@ struct App {
     redraw: bool,
     job: Option<RunningJob>,
     report: String,
+    /// Real video frame shown behind the graphs.
+    grabber: FrameGrabber,
+    video_tex: Option<egui::TextureHandle>,
+    video_time: f64,
+    video_error: Option<String>,
+    /// A frame was requested from the grabber and hasn't arrived yet.
+    frame_pending: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let settings: Settings = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
-        Self {
+        let mut app = Self {
             settings,
             input: None,
             info: None,
@@ -132,7 +141,17 @@ impl App {
             redraw: true,
             job: None,
             report: String::new(),
+            grabber: FrameGrabber::default(),
+            video_tex: None,
+            video_time: 0.0,
+            video_error: None,
+            frame_pending: false,
+        };
+        // A video passed on the command line (or via "Open with") is opened directly.
+        if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
+            app.open_video(path);
         }
+        app
     }
 
     /// Canvas size the layout is being designed for.
@@ -154,9 +173,12 @@ impl App {
                     info.color.describe(),
                     info.duration.map(|d| format!(", {d:.1} s")).unwrap_or_default()
                 );
+                self.video_time = info.duration.unwrap_or(0.0) * 0.25;
                 self.info = Some(info);
                 self.input = Some(path);
                 self.layout_changed = true;
+                self.video_tex = None;
+                self.request_frame();
             }
             Err(e) => self.status = format!("Could not read video: {e:#}"),
         }
@@ -213,6 +235,62 @@ impl App {
 
     fn mark_layout_changed(&mut self) {
         self.layout_changed = true;
+    }
+
+    /// Size video frames are decoded at for the preview (the preview canvas size).
+    fn video_frame_size(&self) -> Option<(usize, usize)> {
+        let info = self.info.as_ref()?;
+        let w = info.width.min(PREVIEW_MAX_W);
+        Some((w, ((info.height as f64 * w as f64 / info.width as f64).round() as usize).max(2)))
+    }
+
+    fn request_frame(&mut self) {
+        if let (Some(input), Some(info), Some((w, h))) = (&self.input, &self.info, self.video_frame_size()) {
+            self.grabber.request(input, info, self.video_time, w, h);
+            self.frame_pending = true;
+        }
+    }
+
+    /// Uploads a newly decoded preview frame to the GPU.
+    fn update_video_frame(&mut self, ctx: &egui::Context) {
+        if let Some(g) = self.grabber.poll() {
+            // An older frame may arrive while a newer request is still being decoded.
+            self.frame_pending = (g.time - self.video_time).abs() > 1e-6;
+            match g.rgba {
+                Ok(rgba) => {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([g.size.0, g.size.1], &rgba);
+                    match &mut self.video_tex {
+                        Some(t) => t.set(image, egui::TextureOptions::LINEAR),
+                        None => self.video_tex = Some(ctx.load_texture("video", image, egui::TextureOptions::LINEAR)),
+                    }
+                    self.video_error = None;
+                }
+                Err(e) => self.video_error = Some(format!("{e:#}")),
+            }
+        }
+        if self.frame_pending {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+    }
+
+    fn video_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(duration) = self.info.as_ref().and_then(|i| i.duration) else {
+            ui.label("Open a video to preview it behind the graphs.");
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label("Frame");
+            let mut t = self.video_time;
+            ui.spacing_mut().slider_width = (ui.available_width() - 200.0).max(120.0);
+            if ui.add(egui::Slider::new(&mut t, 0.0..=duration).show_value(false)).changed() {
+                self.video_time = t;
+                self.request_frame();
+            }
+            ui.monospace(format!("{} / {}", clock(self.video_time), clock(duration)));
+        });
+        if let Some(e) = &self.video_error {
+            ui.colored_label(Color32::from_rgb(230, 110, 110), e);
+        }
     }
 
     // ---- panels ----------------------------------------------------------------
@@ -370,26 +448,11 @@ impl App {
         ui.indent("csvnits", |ui| ui.add_enabled(s.export_csv, egui::Checkbox::new(&mut s.csv_nits, "include nits columns")));
         ui.checkbox(&mut s.export_video, "Video with graphs (.mp4, HDR kept)");
         ui.checkbox(&mut s.export_graphs, "Graphs only (ProRes 4444 + alpha .mov)");
-        ui.add_enabled_ui(s.export_graphs, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Size");
-                let label = format!("{}x{}", s.graphs_size.0, s.graphs_size.1);
-                let mut size_changed = false;
-                egui::ComboBox::from_id_salt("gsize").selected_text(label).show_ui(ui, |ui| {
-                    for size in GRAPH_SIZES {
-                        size_changed |= ui.selectable_value(&mut s.graphs_size, size, format!("{}x{}", size.0, size.1)).changed();
-                    }
-                    if let Some(i) = &self.info {
-                        size_changed |= ui.selectable_value(&mut s.graphs_size, (i.width, i.height), "Same as video").changed();
-                    }
-                });
-                size_changed |= ui.add(egui::DragValue::new(&mut s.graphs_size.0).range(64..=7680)).changed();
-                ui.label("x");
-                size_changed |= ui.add(egui::DragValue::new(&mut s.graphs_size.1).range(64..=4320)).changed();
-                if size_changed && s.preview_target == PreviewTarget::Graphs {
-                    self.layout_changed = true;
-                }
-            });
+        ui.horizontal(|ui| {
+            ui.label("Graphs size");
+            if graphs_size_picker(ui, &mut s.graphs_size, self.info.as_ref()) && s.preview_target == PreviewTarget::Graphs {
+                self.layout_changed = true;
+            }
         });
         ui.horizontal(|ui| {
             let dir = s.output_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "next to the video".into());
@@ -447,11 +510,23 @@ impl App {
                 self.layout_changed = true;
             }
             let (tw, th) = self.target_size();
-            ui.label(format!("canvas {tw}x{th}"));
+            if self.settings.preview_target == PreviewTarget::Graphs {
+                if graphs_size_picker(ui, &mut self.settings.graphs_size, self.info.as_ref()) {
+                    self.layout_changed = true;
+                }
+            } else {
+                ui.label(format!("canvas {tw}x{th}"));
+            }
             ui.separator();
             ui.checkbox(&mut self.animate, "Animate demo data");
             ui.label("(demo data; drag graphs to move, drag a corner to resize)");
         });
+
+        let ctx = ui.ctx().clone();
+        self.update_video_frame(&ctx);
+        if self.settings.preview_target == PreviewTarget::Video {
+            self.video_controls(ui);
+        }
 
         // Fit the target aspect ratio into the available space.
         let (tw, th) = self.target_size();
@@ -462,7 +537,12 @@ impl App {
         let rect = response.rect;
 
         self.update_preview_image(ui.ctx());
-        background(&painter, rect, self.settings.preview_target);
+        match (&self.video_tex, self.settings.preview_target) {
+            (Some(tex), PreviewTarget::Video) => {
+                painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
+            _ => background(&painter, rect, self.settings.preview_target),
+        }
         if let Some(tex) = &self.texture {
             painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }
@@ -573,6 +653,33 @@ impl App {
         self.layout_changed = false;
         self.redraw = false;
     }
+}
+
+/// Preset and custom size for the graphs-only export. Returns true if it changed.
+fn graphs_size_picker(ui: &mut egui::Ui, size: &mut (usize, usize), info: Option<&VideoInfo>) -> bool {
+    let mut changed = false;
+    let current = GRAPH_SIZES
+        .iter()
+        .find(|(_, s)| s == size)
+        .map(|(name, s)| format!("{name} ({}x{})", s.0, s.1))
+        .unwrap_or_else(|| format!("{}x{}", size.0, size.1));
+    egui::ComboBox::from_id_salt(ui.next_auto_id()).selected_text(current).show_ui(ui, |ui| {
+        for (name, s) in GRAPH_SIZES {
+            changed |= ui.selectable_value(size, s, format!("{name} ({}x{})", s.0, s.1)).changed();
+        }
+        if let Some(i) = info {
+            changed |= ui.selectable_value(size, (i.width, i.height), format!("Same as video ({}x{})", i.width, i.height)).changed();
+        }
+    });
+    changed |= ui.add(egui::DragValue::new(&mut size.0).range(64..=7680)).changed();
+    ui.label("x");
+    changed |= ui.add(egui::DragValue::new(&mut size.1).range(64..=4320)).changed();
+    changed
+}
+
+/// Seconds as m:ss.s
+fn clock(t: f64) -> String {
+    format!("{}:{:04.1}", (t / 60.0) as u64, t % 60.0)
 }
 
 /// Checkerboard for the transparent graphs export, a dark gradient standing in for video.
