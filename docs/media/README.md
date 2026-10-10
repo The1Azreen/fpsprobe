@@ -4,13 +4,13 @@ Screenshots and GIFs used by the main [README](../../README.md). Add each file w
 
 ## Shot list
 
-| File | What to capture | Suggested size |
-|---|---|---|
-| `demo-overlay.gif` | Hero image at the top of the README: 5–8 s of gameplay with the FPS counter, FPS graph and frame-time graph. A moment where the frame rate changes works best. | 900 px wide, 15–20 fps |
-| `gui-layout-editor.png` | The GUI with a video open: graphs arranged over a video frame, one graph selected in the inspector. | Full window, 1600–2000 px wide |
-| `gui-drag-resize.gif` | Dragging a graph to a new position, then resizing it by its corner. | 900 px wide, 15 fps, under 10 s |
-| `hdr-scopes-grid.png` | A frame from a graphs-only export using the "HDR scopes grid" preset, from an HDR recording. | 1920×1080 |
-| `overlay-fps-hdr.png` | A frame from an exported video using the "FPS + HDR" preset. | 1920×1080 |
+| File | What to capture | Suggested size | Status |
+|---|---|---|---|
+| `demo-overlay.gif` | Hero image at the top of the README: 5–8 s of gameplay with the FPS counter, FPS graph and frame-time graph. A moment where the frame rate changes works best. | 900 px wide, 15–20 fps | to do |
+| `gui-layout-editor.png` | The GUI with a video open: graphs arranged over a video frame, one graph selected in the inspector. | Full window, 1600–2000 px wide | done |
+| `gui-drag-resize.gif` | Dragging a graph to a new position, then resizing it by its corner. | 900 px wide, 15 fps, under 10 s | to do |
+| `hdr-scopes-grid.png` | A frame from a graphs-only export using the "HDR scopes grid" preset, from an HDR recording. | 1920×1080 | to do |
+| `overlay-fps-hdr.png` | A frame from an exported video using the "FPS + HDR" preset. | 1920×1080 | done (header image until the GIF exists) |
 
 Keep each file under about 10 MB. GitHub shows larger GIFs slowly or not at all.
 
