@@ -1,80 +1,74 @@
+# fpsprobe
 
-<p align="center">
-    <img height="100" src="images/logos/trdrop_logo_alpha.png">
-</p>
+GPU-accelerated frame-rate, frame-time and HDR brightness analysis for captured gameplay video.
 
-# trdrop - v1.1.1
-###### ˈtɛr-dɹɑp - a raw video analysis program
-
-## Examples
-
-<p align="center">
-    <img height="160" src="https://github.com/cirquit/trdrop/raw/ef4462994df90fdc3b2c961a76e874a4a964a12e/images/2019-07-28-tear-visualization.gif">
-    <img height="160" src="https://github.com/cirquit/trdrop/raw/ef4462994df90fdc3b2c961a76e874a4a964a12e/images/2019-07-22-plots-options.gif">
-    <img height="160" src="https://github.com/cirquit/trdrop/raw/ef4462994df90fdc3b2c961a76e874a4a964a12e/images/2019-07-13-full-showcase-delta-renderering.gif">
-</p>
-
-## Binaries
-
-```diff
-- Please create an issue if you encounter problems and search the closed issues for already solved ones.
-
-- If you want to have a specific feature in mind, please attach as much exemplary information as possible (screenshots, mockups)
-```
-
-* [**Issues**](https://github.com/cirquit/trdrop/issues?q=is%3Aopen+is%3Aissue)
-* [**Solved Issues**](https://github.com/cirquit/trdrop/issues?q=is%3Aissue+is%3Aclosed)
-
-See the [**release page**](https://github.com/cirquit/trdrop/releases) for the Windows installer. Other distributions are on the roadmap (Linux, MacOS).
-
-## Description
-
-The main use of this software is to estimate the *"real"* framerate of **an uncompressed video**.
-
-Usually, a dedicated [capture card](https://en.wikipedia.org/wiki/Video_capture) is employed to capture the video stream with a fixed framerate of a console. To estimate the real framerate of the console, we check for differences on a frame-by-frame basis and count the different frames. This results in the *"real"* **framerate**.
-
-The same is done with the **frametime**, as we count the amount of time a single frame is shown.
-
-We also try to detect [**frametears**](https://en.wikipedia.org/wiki/Screen_tearing) and incorporate them into the framerate and frametime calculation.
-
-Hence the name **tr** (short for tear) and a framerate **drop**.
+fpsprobe is built for real-world console captures, such as HEVC recordings from an Elgato 4K X. These are compressed, so repeated frames are never bit-identical. Instead of counting a frame as new when any pixel changes, fpsprobe measures each video's own compression-noise floor and separates real motion from noise.
 
 ## Features
 
-* Comparisson of up to 3 videos in parallel
-    - any resolution
-    - any raw and *"real"* framerate
-* Export as imagesequence in `.png` or `.jpg`
-    - Supporting 16:9 export resolution
-* **Framerate** estimation
-    - Customizable plot visualization (`color` + `time`)
-    - Customizable text overlay (`font` + `color` + `position`)
-    - "Centered" plot also possible
-* **Frametime** estimation
-    - Customizable plot visualization (`color` + `time`)
-* **Tear** detection
-    - complementing tears don't change the framerate (configurable)
-    - Visualization (`color`)
-* CSV export
-    - Framerate
-    - Frametime
-* Visual overlay export
-* Difference frame export
+- **Frame rate and frame time** for compressed captures, with a noise-adaptive duplicate threshold.
+- **GPU processing:** hardware video decode through FFmpeg (D3D11VA, CUDA, QSV or Vulkan) and frame comparison in a `wgpu` compute shader.
+- **HDR brightness:** HDR10 (PQ), HLG and SDR. Reports peak and average luminance in nits, plus MaxCLL and MaxFALL.
+- **HDR scopes:** RGB waveform in nits, L/R/G/B histogram, CIE 1931 chromaticity with Rec.709, P3 and Rec.2020 outlines, and a vectorscope.
+- **Exports:**
+  - CSV with per-frame data
+  - the video with the graphs on top (HDR sources stay HDR10)
+  - the graphs alone as ProRes 4444 with transparency, for DaVinci Resolve and other editors
+- **GUI layout editor:** switch graphs on or off, then drag and resize them on a live preview. Layouts save to JSON and can be reused from the command line.
 
-See the [DEVELOPMENT_HISTORY.md](DEVELOPMENT_HISTORY.md) for gifs I made while developing the application.
+## Requirements
 
-We will provide a detailed explanation and showcase in the future.
+- Windows 10/11 (other platforms are untested)
+- [FFmpeg](https://ffmpeg.org/) (`ffmpeg` and `ffprobe`) on `PATH`
+- A GPU supported by `wgpu` (DirectX 12 or Vulkan)
+- [Rust](https://rustup.rs/), to build from source
 
-## Disclaimer
+## Building
 
-trdrop is a free, open-source project we develop in our spare time. While we do our best to make it as accurate as possible, we cannot guarantee that it is free of errors.
+```
+cd fpsprobe
+cargo build --release
+```
 
-We **do not take responsibility** for analysis errors or inaccuracies that might damage or improve the reputation of any brand or organization. trdrop is not an accurate scientific tool, but merely a demonstration of different algorithms.
+This produces two programs in `fpsprobe/target/release/`:
 
-## Contributing
+| Program | Purpose |
+|---|---|
+| `fpsprobe-gui.exe` | Layout editor and exporter |
+| `fpsprobe.exe` | Command line |
 
-trdrop is created with the [Qt framework](https://www.qt.io/) and [OpenCV](https://opencv.org/). Please follow the [DEVELOPMENT.md](DEVELOPMENT.md) guidelines to get started.
+## Command-line examples
+
+```powershell
+# Frame-rate summary and per-frame CSV
+fpsprobe.exe "capture.mp4" --csv "capture_fps.csv"
+
+# Video with FPS and HDR graphs
+fpsprobe.exe "capture.mp4" --nits --render "capture_analysis.mp4"
+
+# Graphs only, transparent ProRes 4444, using a layout saved from the GUI
+fpsprobe.exe "capture.mp4" --layout layout.json --graphs "graphs.mov" --graphs-size 1920x1080
+```
+
+Run `fpsprobe.exe --help` for all options, including `--ignore x,y,w,h`, which excludes HUD elements such as clocks or counters from frame comparison.
+
+## Accuracy notes
+
+- **Frame times are limited by the capture rate.** At 60 Hz they are always multiples of 16.7 ms, so record at 120 Hz for finer detail.
+- **Nits come from the video signal, not from your display.** fpsprobe reports what the console sent; your TV may tone-map or clip it.
+- **MaxCLL uses the brightest single colour channel,** following its CTA-861.3 definition, so it is usually much higher than the peak luminance.
+- **Tearing isn't detected yet.**
+
+fpsprobe is a free, open-source project and is not a certified measurement tool. Check its results before relying on them, especially in published comparisons.
+
+## Acknowledgements
+
+fpsprobe started as a fork of **[trdrop](https://github.com/cirquit/trdrop)** by **Alexander Isenko** ([@cirquit](https://github.com/cirquit)), a raw video frame-rate analysis tool built with Qt and OpenCV. The code has since been rewritten in Rust, but the idea of estimating a console's real frame rate by comparing captured frames comes from trdrop.
+
+Thanks to everyone who contributed to trdrop and trdrop-redux, including Alexander Erben, David Maas, [illusion0001](https://github.com/illusion0001) and MujoA. Their full history is preserved in this repository's git log.
+
+The overlay font is [Fjalla One](https://github.com/SorkinType/FjallaOne) by Sorkin Type, used under the SIL Open Font License 1.1 (see [fpsprobe/assets/fonts/OFL.txt](fpsprobe/assets/fonts/OFL.txt)).
 
 ## License
 
-[MIT License](https://en.wikipedia.org/wiki/MIT_License). Commercial use is allowed.
+[MIT](LICENSE). The license keeps the original trdrop copyright notice, as the MIT terms require.

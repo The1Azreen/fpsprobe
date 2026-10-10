@@ -1,53 +1,9 @@
-# C++ objects and libs
+# Rust build output
+target/
 
-*.slo
-*.lo
-*.o
-*.a
-*.la
-*.lai
-*.so
-*.dll
-*.dylib
-
-# Qt-es
-
-/.qmake.cache
-/.qmake.stash
-*.pro.user
-*.pro.user.*
-*.qbs.user
-*.qbs.user.*
-*.moc
-moc_*.cpp
-qrc_*.cpp
-ui_*.h
-Makefile*
-*build-*
-
-# QtCreator
-
-*.autosave
-
-# QtCtreator Qml
-*.qmlproject.user
-*.qmlproject.user.*
-
-# QtCtreator CMake
-CMakeLists.txt.user
-
-# local images folder
-local-images
-
-# latex
-.ps
-.log
-.aux
-.out
-.dvi
-.bbl
-.blg
-
-# C++ build
-
-build*
+# Editor / OS files
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
