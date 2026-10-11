@@ -27,6 +27,7 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
   - the video with the graphs on top (HDR sources stay HDR10)
   - the graphs alone as ProRes 4444 with transparency, for DaVinci Resolve and other editors
 - **GUI layout editor:** switch graphs on or off, then drag and resize them over a real frame of your video, chosen with a slider. Layouts save to JSON and can be reused from the command line.
+- **Internal resolution detection (experimental):** estimates the game's rendering resolution for retro, interlaced and modern sources. See [below](#internal-resolution-detection-experimental-wip).
 
 ## Screenshots
 
@@ -49,6 +50,41 @@ Graphs are arranged over a frame of the video, picked with the slider; the expor
 </p>
 
 -->
+
+## Internal resolution detection (EXPERIMENTAL WIP)
+
+> [!WARNING]
+> **EXPERIMENTAL / WORK IN PROGRESS.** Results are estimates and can be wrong. Check them, for example with the GUI's pixel counter or your scaler's own status readout.
+
+Upscaling leaves a repeating pattern in the picture: integer scaling repeats every pixel N times, and smooth scaling leaves fine detail on the original pixel grid. fpsprobe measures that pattern in sampled frames to estimate the game's native resolution. You choose the kind of source:
+
+- **Retro:** integer-scaled consoles. Reports the exact scale factor and native resolution.
+- **Interlaced:** 480i consoles through a deinterlacer such as a RetroTINK or Morph 4K. Reports lines per displayed frame and detects bob deinterlacing.
+- **Modern:** dynamic-resolution games upscaled by 1–2×. Measures every sample, so you can see the resolution change over time.
+
+```powershell
+fpsprobe.exe "capture.mp4" --resolution retro|interlaced|modern --resolution-only --resolution-csv resolution.csv
+```
+
+In the GUI, open **Experimental: internal resolution** in the left panel.
+
+### PlayStation Vita TV (Sharpscale), Killzone Mercenary
+Detected **960×540 at integer ×4**: the Vita's native framebuffer integer-scaled to 4K.
+<p align="center">
+  <img src="docs/media/resolution-vita-tv.png" width="900" alt="Killzone Mercenary on PlayStation Vita TV with Sharpscale, captured at 4K">
+</p>
+
+### PlayStation 2 through a Morph 4K, Dead or Alive 2
+Detected **512×448** (scale ×5.63 by ×4.82), matching the Morph 4K's own status line in the corner: `512x448i → 2880x2160`. The Morph menu was excluded from the analysis with an ignore region.
+<p align="center">
+  <img src="docs/media/resolution-ps2-doa2.png" width="900" alt="Dead or Alive 2 on PS2 through a Morph 4K, with the Morph status line showing 512x448i to 2880x2160">
+</p>
+
+**Known limits:**
+- **Analog horizontal resolution depends on your scaler's sampling.** For interlaced PS2 sources, the width reflects how many points per line the scaler samples, not necessarily what the game draws.
+- **Modern reconstruction smooths away the pattern.** TAA, FSR and DLSS make modern results hints rather than measurements.
+- **Encoder blocks can mimic common modern scales.** The video encoder compresses in 8- and 16-pixel blocks, so matches on that grid need much stronger evidence.
+- **Overlays should be masked.** Mask HUDs and scaler menus with `--ignore x,y,w,h`; they're drawn at output resolution.
 
 ## Requirements
 

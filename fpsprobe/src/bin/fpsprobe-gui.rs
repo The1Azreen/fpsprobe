@@ -11,6 +11,7 @@ use fpsprobe::preview::FrameGrabber;
 use fpsprobe::nits::{HIST_BINS, NitsFrame, ScopeData, WAVE_COLS, WAVE_ROWS, XY_BINS};
 use fpsprobe::progress::Progress;
 use fpsprobe::render::fps_series;
+use fpsprobe::resolution::{self, AxisEstimate, ResolutionOptions, ResolutionReport, SourceKind};
 use fpsprobe::video::{self, VideoInfo};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -48,6 +49,8 @@ struct Settings {
     ignore: String,
     preview_target: PreviewTarget,
     output_dir: Option<PathBuf>,
+    res_kind: SourceKind,
+    res_rate: f64,
 }
 
 impl Default for Settings {
@@ -66,6 +69,8 @@ impl Default for Settings {
             ignore: String::new(),
             preview_target: PreviewTarget::Video,
             output_dir: None,
+            res_kind: SourceKind::Modern,
+            res_rate: 2.0,
         }
     }
 }
@@ -119,6 +124,30 @@ struct App {
     video_error: Option<String>,
     /// A frame was requested from the grabber and hasn't arrived yet.
     frame_pending: bool,
+    // Experimental resolution measurement.
+    res_job: Option<(Arc<Progress>, JoinHandle<anyhow::Result<ResolutionReport>>)>,
+    res_report: Option<ResolutionReport>,
+    res_error: Option<String>,
+    /// Pixel counter: drags in the preview select a region instead of moving graphs.
+    counter_mode: bool,
+    counter_drag: Option<Pos2>,
+    /// Selected region as fractions of the frame.
+    counter_sel: Option<Rect>,
+    counter: Option<Counter>,
+}
+
+/// Result of the pixel counter on one region of the current frame.
+struct Counter {
+    tex: egui::TextureHandle,
+    region: (usize, usize, usize, usize),
+    /// Full picture the estimate refers to (active area if measured, else the frame).
+    full: (usize, usize),
+    x: Option<AxisEstimate>,
+    y: Option<AxisEstimate>,
+    steps: f64,
+    run: f64,
+    vertical: bool,
+    open: bool,
 }
 
 impl App {
@@ -146,6 +175,13 @@ impl App {
             video_time: 0.0,
             video_error: None,
             frame_pending: false,
+            res_job: None,
+            res_report: None,
+            res_error: None,
+            counter_mode: false,
+            counter_drag: None,
+            counter_sel: None,
+            counter: None,
         };
         // A video passed on the command line (or via "Open with") is opened directly.
         if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
@@ -217,6 +253,69 @@ impl App {
         let handle = std::thread::spawn(move || export::run(&job, &p));
         self.report = format!("Exporting to {}", dir.display());
         self.job = Some(RunningJob { progress, handle });
+    }
+
+    fn start_resolution(&mut self) {
+        let (Some(input), Some(info)) = (self.input.clone(), self.info.clone()) else { return };
+        let opts = ResolutionOptions {
+            kind: self.settings.res_kind,
+            samples_per_second: self.settings.res_rate,
+            ignore: parse_rects(&self.settings.ignore).unwrap_or_default(),
+            hwaccel: None,
+            max_samples: None,
+        };
+        let progress = Arc::new(Progress::default());
+        let p = progress.clone();
+        let handle = std::thread::spawn(move || resolution::analyze(&input, &info, &opts, &p));
+        self.res_error = None;
+        self.res_job = Some((progress, handle));
+    }
+
+    fn poll_resolution(&mut self, ctx: &egui::Context) {
+        let Some((_, handle)) = &self.res_job else { return };
+        if handle.is_finished() {
+            let (_, handle) = self.res_job.take().unwrap();
+            match handle.join() {
+                Ok(Ok(r)) => self.res_report = Some(r),
+                Ok(Err(e)) => self.res_error = Some(format!("{e:#}")),
+                Err(_) => self.res_error = Some("resolution analysis crashed".into()),
+            }
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Runs the pixel counter on the selected region of the frame at the slider position.
+    fn run_counter(&mut self, ctx: &egui::Context) {
+        let (Some(input), Some(info), Some(sel)) = (&self.input, &self.info, self.counter_sel) else { return };
+        let (w, h) = (info.width as f32, info.height as f32);
+        let x0 = (sel.min.x * w).clamp(0.0, w - 1.0) as usize;
+        let y0 = (sel.min.y * h).clamp(0.0, h - 1.0) as usize;
+        let rw = ((sel.width() * w) as usize).min(info.width - x0);
+        let rh = ((sel.height() * h) as usize).min(info.height - y0);
+        if rw < 16 || rh < 16 {
+            self.res_error = Some("Pixel counter: select a larger region (at least 16x16 video pixels).".into());
+            return;
+        }
+        let luma = match resolution::grab_luma(input, info, self.video_time) {
+            Ok(l) => l,
+            Err(e) => {
+                self.res_error = Some(format!("{e:#}"));
+                return;
+            }
+        };
+        let full = self.res_report.as_ref().map_or((info.width, info.height), |r| (r.active.2, r.active.3));
+        let (ex, ey) = resolution::analyze_region(&luma, info.width, (x0, y0, rw, rh), full, self.settings.res_kind);
+        let mut rgba = Vec::with_capacity(rw * rh * 4);
+        for y in y0..y0 + rh {
+            for &v in &luma[y * info.width + x0..y * info.width + x0 + rw] {
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([rw, rh], &rgba);
+        let tex = ctx.load_texture("pixel-counter", image, egui::TextureOptions::NEAREST);
+        let (steps, run, vertical) = self.counter.as_ref().map_or((10.0, rw as f64, true), |c| (c.steps, c.run, c.vertical));
+        self.counter = Some(Counter { tex, region: (x0, y0, rw, rh), full, x: ex, y: ey, steps, run, vertical, open: true });
     }
 
     fn poll_job(&mut self, ctx: &egui::Context) {
@@ -393,6 +492,62 @@ impl App {
         });
         ui.label("Ignore regions (HUD, clocks): x,y,w,h; …");
         ui.text_edit_singleline(&mut self.settings.ignore);
+
+        ui.separator();
+        egui::CollapsingHeader::new("Experimental: internal resolution").default_open(false).show(ui, |ui| self.resolution_panel(ui));
+    }
+
+    fn resolution_panel(&mut self, ui: &mut egui::Ui) {
+        ui.small("Estimates the game's rendering resolution from upscaling patterns. Treat results as a hint and check them with the pixel counter.");
+        egui::Grid::new("res").num_columns(2).show(ui, |ui| {
+            ui.label("Source");
+            egui::ComboBox::from_id_salt("res_kind").selected_text(self.settings.res_kind.label()).show_ui(ui, |ui| {
+                for k in SourceKind::ALL {
+                    ui.selectable_value(&mut self.settings.res_kind, k, k.label());
+                }
+            });
+            ui.end_row();
+            ui.label("Samples / second");
+            ui.add(egui::DragValue::new(&mut self.settings.res_rate).range(0.2..=10.0).speed(0.1));
+            ui.end_row();
+        });
+        match &self.res_job {
+            Some((progress, _)) => {
+                let (stage, done, total) = progress.snapshot();
+                let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+                ui.add(egui::ProgressBar::new(frac.min(1.0)).text(format!("{stage} {done}/{total}")));
+                if ui.button("Cancel").clicked() {
+                    progress.cancel();
+                }
+            }
+            None => {
+                if ui.add_enabled(self.input.is_some(), egui::Button::new("Measure resolution")).clicked() {
+                    self.start_resolution();
+                }
+            }
+        }
+        if let Some(e) = &self.res_error {
+            ui.colored_label(Color32::from_rgb(230, 110, 110), e);
+        }
+        if let Some(r) = &self.res_report {
+            ui.add(egui::Label::new(egui::RichText::new(r.summary()).monospace().size(10.5)).wrap());
+            if r.samples.len() > 1 {
+                resolution_graph(ui, r);
+            }
+        }
+
+        ui.add_space(6.0);
+        let can_count = self.input.is_some() && self.settings.preview_target == PreviewTarget::Video;
+        ui.add_enabled_ui(can_count, |ui| {
+            if ui.checkbox(&mut self.counter_mode, "Pixel counter").changed() && !self.counter_mode {
+                self.counter_sel = None;
+            }
+        });
+        ui.small(if can_count {
+            "Drag a box over a sharp, slightly slanted edge in the preview to zoom in and count its steps."
+        } else {
+            "Open a video and preview \"Video with graphs\" to use it."
+        });
     }
 
     fn right_panel(&mut self, ui: &mut egui::Ui) {
@@ -568,6 +723,10 @@ impl App {
             })
         };
 
+        if self.counter_mode {
+            self.counter_interaction(ui.ctx(), &response, rect, &painter);
+            return;
+        }
         if let Some(pos) = response.hover_pos() {
             match hit(pos, &self.settings.layout.widgets) {
                 Some((_, DragMode::Resize)) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe),
@@ -621,6 +780,79 @@ impl App {
                 painter.text(r.min + Vec2::new(4.0, -14.0), egui::Align2::LEFT_TOP, w.kind.label(), egui::FontId::proportional(12.0), color);
             }
         }
+    }
+
+    /// Pixel-counter mode: dragging selects a region; releasing analyses it.
+    fn counter_interaction(&mut self, ctx: &egui::Context, response: &egui::Response, rect: Rect, painter: &egui::Painter) {
+        let to_norm = |p: Pos2| Pos2::new(((p.x - rect.min.x) / rect.width()).clamp(0.0, 1.0), ((p.y - rect.min.y) / rect.height()).clamp(0.0, 1.0));
+        ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+        if response.drag_started() {
+            self.counter_drag = response.interact_pointer_pos().map(to_norm);
+        }
+        if let (Some(start), Some(pos)) = (self.counter_drag, response.interact_pointer_pos()) {
+            if response.dragged() {
+                self.counter_sel = Some(Rect::from_two_pos(start, to_norm(pos)));
+            }
+        }
+        if response.drag_stopped() {
+            self.counter_drag = None;
+            self.run_counter(ctx);
+        }
+        if let Some(sel) = self.counter_sel {
+            let screen = Rect::from_min_max(
+                Pos2::new(rect.min.x + sel.min.x * rect.width(), rect.min.y + sel.min.y * rect.height()),
+                Pos2::new(rect.min.x + sel.max.x * rect.width(), rect.min.y + sel.max.y * rect.height()),
+            );
+            painter.rect_stroke(screen, 0.0, Stroke::new(2.0, Color32::from_rgb(255, 200, 60)), StrokeKind::Outside);
+        }
+        painter.text(
+            rect.min + Vec2::new(8.0, 8.0),
+            egui::Align2::LEFT_TOP,
+            "Pixel counter: drag a box over an edge",
+            egui::FontId::proportional(14.0),
+            Color32::from_rgb(255, 200, 60),
+        );
+    }
+
+    fn counter_window(&mut self, ctx: &egui::Context) {
+        let Some(c) = &mut self.counter else { return };
+        let mut open = c.open;
+        egui::Window::new("Pixel counter (experimental)").open(&mut open).default_width(560.0).show(ctx, |ui| {
+            let (x, y, w, h) = c.region;
+            ui.label(format!("Region {w}x{h} at ({x},{y}) of the frame, zoomed (nearest neighbour)."));
+            let zoom = (520.0 / w as f32).min(360.0 / h as f32).max(1.0);
+            ui.add(egui::Image::from_texture(egui::load::SizedTexture::new(c.tex.id(), Vec2::new(w as f32 * zoom, h as f32 * zoom))));
+            ui.separator();
+            ui.strong("Automatic estimate for this region");
+            let line = |a: &Option<AxisEstimate>, name: &str, full: usize| match a {
+                Some(a) => format!(
+                    "{name}: {:.0} of {full} px (scale x{:.3}{}, confidence {})",
+                    a.native,
+                    a.scale,
+                    a.integer.map(|n| format!(", integer x{n}")).unwrap_or_default(),
+                    a.confidence_label()
+                ),
+                None => format!("{name}: no clear pattern in this region"),
+            };
+            ui.label(line(&c.x, "Width", c.full.0));
+            ui.label(line(&c.y, "Height", c.full.1));
+            ui.separator();
+            ui.strong("Manual count");
+            ui.small("Along a slanted edge, count the stair steps and how many output pixels they span in the same direction.");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut c.vertical, true, "Vertical steps");
+                ui.selectable_value(&mut c.vertical, false, "Horizontal steps");
+            });
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut c.steps).range(1.0..=4000.0).speed(0.2));
+                ui.label("steps over");
+                ui.add(egui::DragValue::new(&mut c.run).range(1.0..=8000.0).speed(1.0));
+                ui.label("output pixels");
+            });
+            let full = if c.vertical { c.full.1 } else { c.full.0 };
+            ui.label(format!("= {:.0} native px of {full} ({:.1}%)", full as f64 * c.steps / c.run, 100.0 * c.steps / c.run));
+        });
+        c.open = open;
     }
 
     /// Re-renders the preview image when the layout, target or demo frame changes.
@@ -677,6 +909,42 @@ fn graphs_size_picker(ui: &mut egui::Ui, size: &mut (usize, usize), info: Option
     changed
 }
 
+/// Parses "x,y,w,h; x,y,w,h" into rectangles.
+fn parse_rects(text: &str) -> Option<Vec<[usize; 4]>> {
+    text.split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|part| part.split(',').map(|n| n.trim().parse().ok()).collect::<Option<Vec<usize>>>().and_then(|v| v.try_into().ok()))
+        .collect()
+}
+
+/// Native height per sample over time; colour shows confidence.
+fn resolution_graph(ui: &mut egui::Ui, r: &ResolutionReport) {
+    let (resp, painter) = ui.allocate_painter(Vec2::new(ui.available_width(), 90.0), Sense::hover());
+    let rect = resp.rect;
+    painter.rect_filled(rect, 2.0, Color32::from_gray(28));
+    let full = r.active.3 as f64;
+    let t_max = r.samples.last().map_or(1.0, |s| s.time).max(1e-3);
+    let lo = full * 0.4;
+    let to_y = |v: f64| rect.max.y - ((v - lo) / (full - lo)).clamp(0.0, 1.0) as f32 * rect.height();
+    for frac in [0.5, 0.75, 1.0] {
+        let y = to_y(full * frac);
+        painter.line_segment([Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)], Stroke::new(1.0, Color32::from_gray(55)));
+        painter.text(Pos2::new(rect.min.x + 2.0, y - 1.0), egui::Align2::LEFT_BOTTOM, format!("{:.0}", full * frac), egui::FontId::proportional(9.0), Color32::from_gray(140));
+    }
+    for s in &r.samples {
+        let x = rect.min.x + (s.time / t_max) as f32 * rect.width();
+        let (y, color) = match s.y {
+            Some(a) if a.confidence >= 40.0 => (to_y(a.native), Color32::from_rgb(110, 210, 120)),
+            Some(a) if a.confidence >= 15.0 => (to_y(a.native), Color32::from_rgb(230, 190, 80)),
+            Some(a) => (to_y(a.native), Color32::from_gray(120)),
+            None => (to_y(full), Color32::from_gray(70)),
+        };
+        painter.circle_filled(Pos2::new(x, y), 2.5, color);
+    }
+    resp.on_hover_text("Native height per sample. Green = high confidence, yellow = medium, grey = low / none (drawn at output height).");
+}
+
 /// Seconds as m:ss.s
 fn clock(t: f64) -> String {
     format!("{}:{:04.1}", (t / 60.0) as u64, t % 60.0)
@@ -715,6 +983,8 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_job(&ctx);
+        self.poll_resolution(&ctx);
+        self.counter_window(&ctx);
         egui::Panel::left("settings").resizable(true).default_size(300.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.left_panel(ui));
         });

@@ -4,17 +4,19 @@
 //! - integer (nearest-neighbour) scaling only puts edges on multiples of N pixels;
 //! - linear-style interpolation makes the second derivative peak at source samples.
 //!
-//! For each axis we sum |second difference| of luma across the picture, remove the
-//! slowly varying content, and look for the strongest periodicity with a
-//! periodogram. The period gives the scale factor, and active size / scale the
-//! native size. Which period range is plausible depends on the source, chosen by
-//! [`SourceKind`]:
-//! - Retro / Interlaced: scale factor 1.5..16, detected directly.
-//! - Modern: scale factor 1..2. Its frequency (above Nyquist) aliases to
-//!   1 - 1/scale, which is what we search for.
+//! For each axis we sum a luma difference across the picture, remove the slowly
+//! varying content, and look for the periodicity with a periodogram. The period
+//! gives the scale factor, and active size / scale the native size. The source
+//! type, [`SourceKind`], decides what to look for:
+//! - Retro / Interlaced: |first difference| (edges), scale 2..16. Every repeat of
+//!   the grid shows up at multiples of 1/scale, so candidates are scored on all of
+//!   their harmonics, as in pitch detection, which avoids picking 2x or 1/2x.
+//! - Modern: |second difference| (interpolation), scale 1..2. Its frequency (above
+//!   Nyquist) aliases to 1 - 1/scale, which is what we search for.
 //!
 //! Limits: temporal anti-aliasing and reconstruction (TAA, FSR, DLSS) and heavy
-//! compression weaken the pattern; results come with a confidence score.
+//! compression weaken the pattern, and the encoder's own 8/16-pixel block grid
+//! can mimic common modern scales; results come with a confidence score.
 
 use crate::progress::Progress;
 use crate::video::{self, VideoInfo};
@@ -52,6 +54,11 @@ impl SourceKind {
         }
     }
 
+    /// Retro scalers repeat pixels (edges matter); modern ones interpolate (curvature matters).
+    fn second_difference(self) -> bool {
+        self == SourceKind::Modern
+    }
+
     /// Native size as a fraction of the measured length, from the detected frequency.
     fn native_fraction(self, f: f64) -> f64 {
         match self {
@@ -62,7 +69,11 @@ impl SourceKind {
 }
 
 /// Minimum peak-to-median periodogram ratio to report an estimate at all.
-const MIN_CONFIDENCE: f64 = 8.0;
+const MIN_CONFIDENCE: f64 = 12.0;
+/// Modern detections that coincide with the encoder's block grid (multiples of
+/// 1/32 cycles per pixel) need this much more evidence: HEVC/H.264 block edges
+/// produce the same periodicity at native resolution.
+const CODEC_GRID_FACTOR: f64 = 40.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AxisEstimate {
@@ -76,6 +87,8 @@ pub struct AxisEstimate {
     pub confidence: f64,
     /// Phase of the detected grid (radians), used to spot alternating fields.
     phase: f64,
+    /// The detected period matches the video encoder's block grid (Modern only).
+    pub codec_aligned: bool,
 }
 
 impl AxisEstimate {
@@ -122,9 +135,16 @@ pub struct ResolutionOptions {
 
 // ---- signal processing ----------------------------------------------------------
 
-/// Sum of |second difference| of luma along one axis, per position, over a rectangle.
-/// `along_x`: profile over columns (detects horizontal scaling).
-fn axis_profile(luma: &[u8], width: usize, rect: (usize, usize, usize, usize), mask: &[[usize; 4]], along_x: bool) -> Vec<f64> {
+/// Sum of |first| or |second difference| of luma along one axis, per position,
+/// over a rectangle. `along_x`: profile over columns (detects horizontal scaling).
+fn axis_profile(
+    luma: &[u8],
+    width: usize,
+    rect: (usize, usize, usize, usize),
+    mask: &[[usize; 4]],
+    along_x: bool,
+    second: bool,
+) -> Vec<f64> {
     let (rx, ry, rw, rh) = rect;
     let len = if along_x { rw } else { rh };
     let mut e = vec![0f64; len];
@@ -139,12 +159,13 @@ fn axis_profile(luma: &[u8], width: usize, rect: (usize, usize, usize, usize), m
                 if x == rx || x + 1 == rx + rw {
                     continue;
                 }
-                row[x - 1] as i32 - 2 * row[x] as i32 + row[x + 1] as i32
+                if second { row[x - 1] as i32 - 2 * row[x] as i32 + row[x + 1] as i32 } else { row[x] as i32 - row[x - 1] as i32 }
             } else {
                 if y == ry || y + 1 == ry + rh {
                     continue;
                 }
-                luma[(y - 1) * width + x] as i32 - 2 * row[x] as i32 + luma[(y + 1) * width + x] as i32
+                let above = luma[(y - 1) * width + x] as i32;
+                if second { above - 2 * row[x] as i32 + luma[(y + 1) * width + x] as i32 } else { row[x] as i32 - above }
             };
             if d != 0 && (mask.is_empty() || !masked(x, y)) {
                 let i = if along_x { x - rx } else { y - ry };
@@ -224,8 +245,81 @@ fn find_period(s: &[f64], band: (f64, f64)) -> Option<(f64, f64, f64)> {
     Some((f, power[peak] / median, phases[peak]))
 }
 
+/// Normalized periodogram value and phase of `s` at frequency `f` (cycles/pixel).
+fn power_at(s: &[f64], energy: f64, f: f64) -> (f64, f64) {
+    let (ws, wc) = (-std::f64::consts::TAU * f).sin_cos();
+    let (mut zr, mut zi) = (1.0f64, 0.0f64);
+    let (mut ar, mut ai) = (0.0f64, 0.0f64);
+    for &v in s {
+        ar += v * zr;
+        ai += v * zi;
+        (zr, zi) = (zr * wc - zi * ws, zr * ws + zi * wc);
+    }
+    ((ar * ar + ai * ai) / energy, ai.atan2(ar))
+}
+
+/// Retro / interlaced: finds the pixel-repeat period by scoring each candidate on
+/// all of its harmonics k/p (k/p <= 0.5). A grid with period p also explains
+/// candidates p/2 (every other harmonic) and 2p (half of its harmonics), so the
+/// true period scores highest; near-ties go to the longer period, which explains
+/// more harmonics. Returns (frequency 1/p, confidence, phase at 1/p).
+fn find_scale_comb(s: &[f64]) -> Option<(f64, f64, f64)> {
+    let energy: f64 = s.iter().map(|v| v * v).sum();
+    if s.len() < 32 || energy <= 0.0 {
+        return None;
+    }
+    let mut cache: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
+    let mut power = |f: f64| *cache.entry((f * 1e6).round() as u64).or_insert_with(|| power_at(s, energy, f).0);
+    let mut candidates = Vec::new();
+    // Periods below 2 px would put the fundamental above Nyquist, where it folds
+    // onto another candidate's frequency.
+    let mut p = 2.0f64;
+    while p <= 16.0 {
+        let harmonics = ((0.5 * p).floor() as usize).clamp(1, 8);
+        let score = (1..=harmonics).map(|k| power(k as f64 / p)).sum::<f64>() / harmonics as f64;
+        candidates.push((p, score));
+        p *= 1.002;
+    }
+    let mut scores: Vec<f64> = candidates.iter().map(|c| c.1).collect();
+    scores.sort_by(f64::total_cmp);
+    let median = scores[scores.len() / 2].max(1e-9);
+    let best = *scores.last()?;
+    if best / median < MIN_CONFIDENCE {
+        return None;
+    }
+    let (mut p, score) = candidates.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    // The best-scoring period can be a fraction of the true one (its harmonics are
+    // a subset). A multiple m*p is real only if the harmonics it adds, those that
+    // are not harmonics of p, carry energy too: true for a x9 line-doubled grid
+    // seen as x3, not for a x4 grid tested as x8.
+    let base = p;
+    for m in 2..=(16.0 / base).floor() as usize {
+        let q = base * m as f64;
+        let added: Vec<f64> = (1..=((0.5 * q).floor() as usize).min(16)).filter(|k| k % m != 0).map(|k| power(k as f64 / q)).collect();
+        if !added.is_empty() && added.iter().sum::<f64>() / added.len() as f64 >= 0.25 * score {
+            p = q;
+        }
+    }
+    let (_, phase) = power_at(s, energy, 1.0 / p);
+    Some((1.0 / p, score / median, phase))
+}
+
+/// Whether frequency `f` lies on the encoder block grid (a multiple of 1/32).
+fn on_codec_grid(f: f64) -> bool {
+    let k = f * 32.0;
+    (k - k.round()).abs() < 0.12 && k.round() >= 1.0
+}
+
 fn estimate_axis(profile: &[f64], kind: SourceKind, full_len: usize) -> Option<AxisEstimate> {
-    let (f, confidence, phase) = find_period(&detrend(profile), kind.band())?;
+    let signal = detrend(profile);
+    let (f, confidence, phase) = match kind {
+        SourceKind::Modern => find_period(&signal, kind.band())?,
+        _ => find_scale_comb(&signal)?,
+    };
+    let codec_aligned = kind == SourceKind::Modern && on_codec_grid(f);
+    if codec_aligned && confidence < MIN_CONFIDENCE * CODEC_GRID_FACTOR {
+        return None;
+    }
     let fraction = kind.native_fraction(f);
     let scale = 1.0 / fraction;
     let rounded = scale.round();
@@ -234,7 +328,7 @@ fn estimate_axis(profile: &[f64], kind: SourceKind, full_len: usize) -> Option<A
         Some(n) => full_len as f64 / n as f64,
         None => full_len as f64 * fraction,
     };
-    Some(AxisEstimate { native, scale, integer, confidence, phase })
+    Some(AxisEstimate { native, scale, integer, confidence, phase, codec_aligned })
 }
 
 /// Estimates both axes over `region` of a luma frame. Native sizes are reported for
@@ -246,8 +340,9 @@ pub fn analyze_region(
     full: (usize, usize),
     kind: SourceKind,
 ) -> (Option<AxisEstimate>, Option<AxisEstimate>) {
-    let x = estimate_axis(&axis_profile(luma, width, region, &[], true), kind, full.0);
-    let y = estimate_axis(&axis_profile(luma, width, region, &[], false), kind, full.1);
+    let second = kind.second_difference();
+    let x = estimate_axis(&axis_profile(luma, width, region, &[], true, second), kind, full.0);
+    let y = estimate_axis(&axis_profile(luma, width, region, &[], false, second), kind, full.1);
     (x, y)
 }
 
@@ -317,8 +412,19 @@ pub fn analyze(input: &Path, info: &VideoInfo, opts: &ResolutionOptions, progres
         if progress.is_cancelled() || opts.max_samples.is_some_and(|m| index >= m) {
             break;
         }
+        // Ignored regions (e.g. a scaler's on-screen menu) can extend past the
+        // picture, so they don't count towards finding its borders either.
         for (y, row) in buf.chunks_exact(w).enumerate() {
+            let masked: Vec<(usize, usize)> = opts
+                .ignore
+                .iter()
+                .filter(|&&[_, my, _, mh]| y >= my && y < my + mh)
+                .map(|&[mx, _, mw, _]| (mx, mx + mw))
+                .collect();
             for (x, &v) in row.iter().enumerate() {
+                if masked.iter().any(|&(a, b)| x >= a && x < b) {
+                    continue;
+                }
                 col_max[x] = col_max[x].max(v);
                 row_max[y] = row_max[y].max(v);
             }
@@ -346,8 +452,9 @@ pub fn analyze(input: &Path, info: &VideoInfo, opts: &ResolutionOptions, progres
     let mut sum_y = vec![0f64; ah];
     let mut samples = Vec::with_capacity(frames.len());
     for (time, luma) in &frames {
-        let px = axis_profile(luma, w, active, &opts.ignore, true);
-        let py = axis_profile(luma, w, active, &opts.ignore, false);
+        let second = opts.kind.second_difference();
+        let px = axis_profile(luma, w, active, &opts.ignore, true, second);
+        let py = axis_profile(luma, w, active, &opts.ignore, false, second);
         sum_x.iter_mut().zip(&px).for_each(|(a, b)| *a += b);
         sum_y.iter_mut().zip(&py).for_each(|(a, b)| *a += b);
         samples.push(SampleEstimate {
@@ -411,7 +518,8 @@ impl ResolutionReport {
                     Some(n) => format!("integer x{n}"),
                     None => format!("x{:.3}", a.scale),
                 };
-                format!("{name:<16} {:.0} px  (scale {scale}, confidence {} {:.0})\n", a.native, a.confidence_label(), a.confidence)
+                let codec = if a.codec_aligned { ", matches encoder block grid" } else { "" };
+                format!("{name:<16} {:.0} px  (scale {scale}, confidence {} {:.0}{codec})\n", a.native, a.confidence_label(), a.confidence)
             }
             None => format!("{name:<16} no upscaling pattern found (native, or hidden by filtering/compression)\n"),
         };
@@ -419,7 +527,17 @@ impl ResolutionReport {
             SourceKind::Modern => {
                 for (vertical, name) in [(false, "native width"), (true, "native height")] {
                     let v = self.confident(vertical);
-                    if v.is_empty() {
+                    let other = self.confident(!vertical);
+                    if v.is_empty() && !other.is_empty() {
+                        // Dynamic resolution scales both axes together, so derive this
+                        // axis from the other one's scale.
+                        let (own, theirs) = if vertical { (ah, aw) } else { (aw, ah) };
+                        let ratio = own as f64 / theirs as f64;
+                        out += &format!(
+                            "{name:<16} median ~{:.0} px (assumed from the other axis; not measured confidently)\n",
+                            percentile(&other, 0.5) * ratio
+                        );
+                    } else if v.is_empty() {
                         out += &format!("{name:<16} no confident samples\n");
                     } else {
                         out += &format!(
@@ -433,9 +551,19 @@ impl ResolutionReport {
                     }
                 }
             }
-            _ => {
+            SourceKind::Retro => {
                 out += &describe(&self.overall_x, "native width");
                 out += &describe(&self.overall_y, "native height");
+            }
+            SourceKind::Interlaced => {
+                out += &describe(&self.overall_x, "native width");
+                // Per displayed frame (what each deinterlaced frame shows) vs all
+                // frames combined (both fields interleaved over time).
+                let per_frame = self.confident(true);
+                if !per_frame.is_empty() {
+                    out += &format!("{:<16} {:.0} lines per displayed frame (median of {} frames)\n", "native height", percentile(&per_frame, 0.5), per_frame.len());
+                }
+                out += &describe(&self.overall_y, "both fields");
             }
         }
         if let Some(f) = self.field_alternation {
