@@ -5,6 +5,7 @@ use clap::{Parser, ValueEnum};
 use fpsprobe::export::{self, ExportJob};
 use fpsprobe::layout::Layout;
 use fpsprobe::progress::Progress;
+use fpsprobe::resolution::{self, ResolutionOptions, SourceKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,6 +22,13 @@ enum Hwaccel {
     Qsv,
     Vulkan,
     None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ResolutionMode {
+    Retro,
+    Interlaced,
+    Modern,
 }
 
 #[derive(Parser, Debug)]
@@ -72,6 +80,18 @@ struct Args {
     /// Stop after this many frames
     #[arg(long)]
     max_frames: Option<usize>,
+    /// EXPERIMENTAL: estimate the game's internal resolution for this kind of source
+    #[arg(long, value_enum)]
+    resolution: Option<ResolutionMode>,
+    /// Frames (or frame pairs for interlaced) sampled per second for --resolution
+    #[arg(long, default_value_t = 2.0)]
+    resolution_rate: f64,
+    /// Write per-sample resolution estimates to this CSV
+    #[arg(long)]
+    resolution_csv: Option<PathBuf>,
+    /// Only run --resolution (skip frame-rate analysis)
+    #[arg(long)]
+    resolution_only: bool,
 }
 
 fn parse_rect(s: &str) -> Result<[usize; 4], String> {
@@ -86,6 +106,28 @@ fn parse_size(s: &str) -> Result<(usize, usize), String> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(mode) = args.resolution {
+        let info = fpsprobe::video::probe(&args.input)?;
+        let opts = ResolutionOptions {
+            kind: match mode {
+                ResolutionMode::Retro => SourceKind::Retro,
+                ResolutionMode::Interlaced => SourceKind::Interlaced,
+                ResolutionMode::Modern => SourceKind::Modern,
+            },
+            samples_per_second: args.resolution_rate,
+            ignore: args.ignore.clone(),
+            hwaccel: None,
+            max_samples: None,
+        };
+        let report = resolution::analyze(&args.input, &info, &opts, &Progress::default())?;
+        print!("{}", report.summary());
+        if let Some(path) = &args.resolution_csv {
+            report.write_csv(path)?;
+        }
+        if args.resolution_only {
+            return Ok(());
+        }
+    }
     let layout = match &args.layout {
         Some(path) => Layout::load(path)?,
         None if args.nits => Layout::preset_fps_hdr(),

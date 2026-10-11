@@ -13,4 +13,5 @@ pub mod nits;
 pub mod preview;
 pub mod progress;
 pub mod render;
+pub mod resolution;
 pub mod video;
