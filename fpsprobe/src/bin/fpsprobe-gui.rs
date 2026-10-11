@@ -6,7 +6,7 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use fpsprobe::canvas::{Canvas, FrameData};
 use fpsprobe::export::{self, ExportJob, ExportReport};
-use fpsprobe::layout::{Layout, Widget};
+use fpsprobe::layout::{Layout, RectPx, Snap, Widget, snap_move, snap_resize};
 use fpsprobe::preview::FrameGrabber;
 use fpsprobe::nits::{HIST_BINS, NitsFrame, ScopeData, WAVE_COLS, WAVE_ROWS, XY_BINS};
 use fpsprobe::progress::Progress;
@@ -51,6 +51,14 @@ struct Settings {
     output_dir: Option<PathBuf>,
     res_kind: SourceKind,
     res_rate: f64,
+    /// Show the experimental internal-resolution tools (off by default).
+    show_experimental: bool,
+    /// Snap to the grid while dragging without holding Shift (Shift then turns it off).
+    snap_always: bool,
+    /// Grid spacing in canvas pixels.
+    grid_px: u32,
+    /// Prevents moving or resizing any graph.
+    lock_layout: bool,
 }
 
 impl Default for Settings {
@@ -71,6 +79,10 @@ impl Default for Settings {
             output_dir: None,
             res_kind: SourceKind::Modern,
             res_rate: 2.0,
+            show_experimental: false,
+            snap_always: false,
+            grid_px: 16,
+            lock_layout: false,
         }
     }
 }
@@ -134,6 +146,8 @@ struct App {
     /// Selected region as fractions of the frame.
     counter_sel: Option<Rect>,
     counter: Option<Counter>,
+    /// Alignment lines the dragged graph locked onto (canvas px), drawn while dragging.
+    guides: (Vec<f32>, Vec<f32>),
 }
 
 /// Result of the pixel counter on one region of the current frame.
@@ -182,6 +196,7 @@ impl App {
             counter_drag: None,
             counter_sel: None,
             counter: None,
+            guides: (Vec::new(), Vec::new()),
         };
         // A video passed on the command line (or via "Open with") is opened directly.
         if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
@@ -494,7 +509,15 @@ impl App {
         ui.text_edit_singleline(&mut self.settings.ignore);
 
         ui.separator();
-        egui::CollapsingHeader::new("Experimental: internal resolution").default_open(false).show(ui, |ui| self.resolution_panel(ui));
+        if ui.checkbox(&mut self.settings.show_experimental, "Show experimental features").changed() && !self.settings.show_experimental {
+            // Hiding the section also leaves pixel-counter mode.
+            self.counter_mode = false;
+            self.counter_sel = None;
+            self.counter = None;
+        }
+        if self.settings.show_experimental {
+            egui::CollapsingHeader::new("Experimental: internal resolution").default_open(false).show(ui, |ui| self.resolution_panel(ui));
+        }
     }
 
     fn resolution_panel(&mut self, ui: &mut egui::Ui) {
@@ -561,7 +584,10 @@ impl App {
             }
             Some(w) => {
                 ui.strong(w.kind.label());
-                changed |= ui.checkbox(&mut w.enabled, "Shown").changed();
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut w.enabled, "Shown").changed();
+                    ui.checkbox(&mut w.locked, "Locked");
+                });
                 egui::Grid::new("geom").num_columns(2).show(ui, |ui| {
                     let mut px = [w.x * tw, w.y * th, w.w * tw, w.h * th];
                     for (name, v) in ["X", "Y", "Width", "Height"].iter().zip(px.iter_mut()) {
@@ -674,7 +700,15 @@ impl App {
             }
             ui.separator();
             ui.checkbox(&mut self.animate, "Animate demo data");
-            ui.label("(demo data; drag graphs to move, drag a corner to resize)");
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.settings.lock_layout, "Lock layout");
+            ui.separator();
+            ui.checkbox(&mut self.settings.snap_always, "Always snap to grid");
+            ui.label("Grid");
+            ui.add(egui::DragValue::new(&mut self.settings.grid_px).range(2..=256).suffix(" px"));
+            ui.separator();
+            ui.small("Drag to move, corner to resize. Shift: grid  \u{b7}  Ctrl: align to other graphs  \u{b7}  Arrows: nudge (Shift: one grid step)");
         });
 
         let ctx = ui.ctx().clone();
@@ -739,47 +773,129 @@ impl App {
                 if let Some((index, mode)) = hit(pos, &self.settings.layout.widgets) {
                     let w = &self.settings.layout.widgets[index];
                     self.selected = Some(index);
-                    self.drag = Some(Drag { index, mode, start_pointer: pos, start: (w.x, w.y, w.w, w.h) });
+                    if !self.settings.lock_layout && !w.locked {
+                        self.drag = Some(Drag { index, mode, start_pointer: pos, start: (w.x, w.y, w.w, w.h) });
+                    }
                 }
             }
         }
         if response.dragged() {
             if let (Some(d), Some(pos)) = (&self.drag, response.interact_pointer_pos()) {
+                // Work in canvas pixels so grid steps and alignment are exact.
+                let (cw, ch) = (tw as f32, th as f32);
                 let delta = pos - d.start_pointer;
-                let (dx, dy) = (delta.x / rect.width(), delta.y / rect.height());
+                let (dx, dy) = (delta.x / rect.width() * cw, delta.y / rect.height() * ch);
+                let (x, y, ww, wh) = (d.start.0 * cw, d.start.1 * ch, d.start.2 * cw, d.start.3 * ch);
+                let modifiers = ui.input(|i| i.modifiers);
+                let snap = Snap {
+                    grid: (self.settings.snap_always != modifiers.shift).then_some(self.settings.grid_px as f32),
+                    align: modifiers.ctrl || modifiers.command,
+                    threshold: 10.0 * cw / rect.width(),
+                };
+                let others: Vec<RectPx> = self
+                    .settings
+                    .layout
+                    .widgets
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, w)| *i != d.index && w.enabled)
+                    .map(|(_, w)| w.rect_px(cw, ch))
+                    .collect();
+                let snapped = match d.mode {
+                    DragMode::Move => snap_move((x + dx, y + dy, ww, wh), &others, (cw, ch), snap),
+                    DragMode::Resize => snap_resize((x, y, ww + dx, wh + dy), &others, (cw, ch), snap, 0.02 * cw.min(ch)),
+                };
+                let (nx, ny, nw, nh) = snapped.rect;
                 let w = &mut self.settings.layout.widgets[d.index];
-                let (x, y, ww, wh) = d.start;
-                match d.mode {
-                    DragMode::Move => {
-                        w.x = (x + dx).clamp(0.0, 1.0 - ww);
-                        w.y = (y + dy).clamp(0.0, 1.0 - wh);
-                    }
-                    DragMode::Resize => {
-                        w.w = (ww + dx).clamp(0.02, 1.0 - x);
-                        w.h = (wh + dy).clamp(0.02, 1.0 - y);
-                    }
-                }
+                (w.x, w.y, w.w, w.h) = (nx / cw, ny / ch, nw / cw, nh / ch);
+                self.guides = (snapped.guides_x, snapped.guides_y);
                 self.layout_changed = true;
             }
         }
         if response.drag_stopped() {
             self.drag = None;
+            self.guides = (Vec::new(), Vec::new());
         }
+        self.nudge_selected(ui, (tw, th));
         if response.clicked() {
             self.selected = response.interact_pointer_pos().and_then(|p| hit(p, &self.settings.layout.widgets)).map(|(i, _)| i);
         }
 
+        // While dragging: the grid (when snapping to it) and the alignment lines in use.
+        if self.drag.is_some() {
+            let grid_on = self.settings.snap_always != ui.input(|i| i.modifiers.shift);
+            let (sx, sy) = (rect.width() / tw as f32, rect.height() / th as f32);
+            let step = self.settings.grid_px as f32;
+            if grid_on && step * sx >= 6.0 {
+                let faint = Stroke::new(1.0, Color32::from_white_alpha(22));
+                let mut gx = 0.0;
+                while gx <= tw as f32 {
+                    let x = rect.min.x + gx * sx;
+                    painter.line_segment([Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)], faint);
+                    gx += step;
+                }
+                let mut gy = 0.0;
+                while gy <= th as f32 {
+                    let y = rect.min.y + gy * sy;
+                    painter.line_segment([Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)], faint);
+                    gy += step;
+                }
+            }
+            let guide = Stroke::new(1.5, Color32::from_rgb(255, 90, 200));
+            for &gx in &self.guides.0 {
+                let x = rect.min.x + gx * sx;
+                painter.line_segment([Pos2::new(x, rect.min.y), Pos2::new(x, rect.max.y)], guide);
+            }
+            for &gy in &self.guides.1 {
+                let y = rect.min.y + gy * sy;
+                painter.line_segment([Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)], guide);
+            }
+        }
+
         // Outlines and resize handles on top of the rendered preview.
+        let all_locked = self.settings.lock_layout;
         for (i, w) in self.settings.layout.widgets.iter().enumerate().filter(|(_, w)| w.enabled) {
             let r = to_screen(w);
             let selected = self.selected == Some(i);
-            let color = if selected { Color32::from_rgb(90, 170, 255) } else { Color32::from_white_alpha(70) };
+            let locked = all_locked || w.locked;
+            let color = match (selected, locked) {
+                (true, false) => Color32::from_rgb(90, 170, 255),
+                (true, true) => Color32::from_rgb(255, 170, 60),
+                (false, true) => Color32::from_rgba_unmultiplied(255, 170, 60, 90),
+                (false, false) => Color32::from_white_alpha(70),
+            };
             painter.rect_stroke(r, 0.0, Stroke::new(if selected { 2.0 } else { 1.0 }, color), StrokeKind::Inside);
             painter.rect_filled(Rect::from_center_size(r.max - Vec2::splat(handle_size / 2.0), Vec2::splat(handle_size)), 2.0, color);
             if selected {
-                painter.text(r.min + Vec2::new(4.0, -14.0), egui::Align2::LEFT_TOP, w.kind.label(), egui::FontId::proportional(12.0), color);
+                let label = if locked { format!("{} (locked)", w.kind.label()) } else { w.kind.label().to_string() };
+                painter.text(r.min + Vec2::new(4.0, -14.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(12.0), color);
             }
         }
+    }
+
+    /// Arrow keys move the selected graph by one canvas pixel, or one grid step with Shift.
+    fn nudge_selected(&mut self, ui: &egui::Ui, (tw, th): (usize, usize)) {
+        if ui.ctx().egui_wants_keyboard_input() || self.settings.lock_layout {
+            return;
+        }
+        let Some(w) = self.selected.and_then(|i| self.settings.layout.widgets.get_mut(i)) else { return };
+        if w.locked {
+            return;
+        }
+        let (mut dx, mut dy, shift) = ui.input(|i| {
+            let k = |key| i.key_pressed(key) as i32 as f32;
+            (k(egui::Key::ArrowRight) - k(egui::Key::ArrowLeft), k(egui::Key::ArrowDown) - k(egui::Key::ArrowUp), i.modifiers.shift)
+        });
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        let step = if shift { self.settings.grid_px as f32 } else { 1.0 };
+        dx *= step;
+        dy *= step;
+        let (cw, ch) = (tw as f32, th as f32);
+        w.x = ((w.x * cw + dx) / cw).clamp(0.0, 1.0 - w.w);
+        w.y = ((w.y * ch + dy) / ch).clamp(0.0, 1.0 - w.h);
+        self.layout_changed = true;
     }
 
     /// Pixel-counter mode: dragging selects a region; releasing analyses it.

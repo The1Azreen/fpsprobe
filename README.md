@@ -26,7 +26,7 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
   - CSV with per-frame data
   - the video with the graphs on top (HDR sources stay HDR10)
   - the graphs alone as ProRes 4444 with transparency, for DaVinci Resolve and other editors
-- **GUI layout editor:** switch graphs on or off, then drag and resize them over a real frame of your video, chosen with a slider. Layouts save to JSON and can be reused from the command line.
+- **GUI layout editor:** switch graphs on or off, then drag and resize them over a real frame of your video, chosen with a slider. Snap to a grid or align graphs to each other, nudge with the arrow keys, and lock graphs in place. Layouts save to JSON and can be reused from the command line.
 - **Internal resolution detection (experimental):** estimates the game's rendering resolution for retro, interlaced and modern sources. See [below](#internal-resolution-detection-experimental-wip).
 
 ## Screenshots
@@ -36,6 +36,17 @@ Graphs are arranged over a frame of the video, picked with the slider; the expor
 <p align="center">
   <img src="docs/media/gui-layout-editor.png" width="900" alt="fpsprobe GUI: FPS counter and graphs arranged over a frame of a 3DS capture while an export runs">
 </p>
+
+**Placing graphs precisely:**
+
+| Control | What it does |
+|---|---|
+| Hold **Shift** while dragging | Snap to the grid (size set in the toolbar, in output pixels) |
+| Hold **Ctrl** while dragging | Align edges and centres to other graphs and to the canvas edges and centre |
+| **Arrow keys** / **Shift + arrows** | Nudge the selected graph by 1 pixel / one grid step |
+| **Lock layout** (toolbar) | Stop every graph from being moved or resized |
+| **Locked** (inspector) | Lock just the selected graph |
+| **Always snap to grid** (toolbar) | Snap without holding Shift; Shift then turns snapping off |
 
 <!-- MEDIA: uncomment each image once its file exists in docs/media/ (see docs/media/README.md)
 
@@ -66,7 +77,7 @@ Upscaling leaves a repeating pattern in the picture: integer scaling repeats eve
 fpsprobe.exe "capture.mp4" --resolution retro|interlaced|modern --resolution-only --resolution-csv resolution.csv
 ```
 
-In the GUI, open **Experimental: internal resolution** in the left panel.
+In the GUI, tick **Show experimental features** at the bottom of the left panel (off by default), then open **Experimental: internal resolution**. On the command line it only runs when you pass `--resolution`.
 
 ### PlayStation Vita TV (Sharpscale), Killzone Mercenary
 Detected **960×540 at integer ×4**: the Vita's native framebuffer integer-scaled to 4K.

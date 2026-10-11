@@ -96,12 +96,25 @@ pub struct Widget {
     pub bg_opacity: f32,
     /// Seconds of history for scrolling graphs.
     pub history_seconds: f32,
+    /// Locked graphs can't be moved or resized in the editor.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl Widget {
     /// Creates a widget from a rectangle in 1920x1080 reference pixels.
     fn at(kind: WidgetKind, enabled: bool, x: f32, y: f32, w: f32, h: f32) -> Self {
-        Self { kind, enabled, x: x / 1920.0, y: y / 1080.0, w: w / 1920.0, h: h / 1080.0, bg_opacity: 0.78, history_seconds: 10.0 }
+        Self {
+            kind,
+            enabled,
+            x: x / 1920.0,
+            y: y / 1080.0,
+            w: w / 1920.0,
+            h: h / 1080.0,
+            bg_opacity: 0.78,
+            history_seconds: 10.0,
+            locked: false,
+        }
     }
 
     /// Rectangle in pixels on a canvas of the given size.
@@ -211,5 +224,168 @@ impl Layout {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         std::fs::write(path, serde_json::to_string_pretty(self)?).with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+// ---- snapping for the layout editor ---------------------------------------------------
+
+/// A rectangle in canvas pixels: (x, y, w, h).
+pub type RectPx = (f32, f32, f32, f32);
+
+/// How a moved or resized rectangle should snap. Distances are in canvas pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct Snap {
+    /// Snap to a grid of this spacing.
+    pub grid: Option<f32>,
+    /// Snap edges and centres to other rectangles and to the canvas edges and centre.
+    pub align: bool,
+    /// How close (in canvas pixels) an edge must be to an alignment line to snap.
+    pub threshold: f32,
+}
+
+/// Result of snapping: the adjusted rectangle and the alignment lines it locked onto
+/// (canvas x positions and y positions), for drawing guides.
+#[derive(Clone, Debug, Default)]
+pub struct Snapped {
+    pub rect: RectPx,
+    pub guides_x: Vec<f32>,
+    pub guides_y: Vec<f32>,
+}
+
+/// Lines other rectangles and the canvas offer along one axis: edges and centres.
+fn alignment_lines(others: &[RectPx], canvas_len: f32, vertical: bool) -> Vec<f32> {
+    let mut lines = vec![0.0, canvas_len / 2.0, canvas_len];
+    for &(x, y, w, h) in others {
+        let (start, len) = if vertical { (y, h) } else { (x, w) };
+        lines.extend([start, start + len / 2.0, start + len]);
+    }
+    lines
+}
+
+/// Smallest shift that puts one of `anchors` on one of `lines`, if within `threshold`.
+fn nearest_shift(anchors: &[f32], lines: &[f32], threshold: f32) -> Option<(f32, f32)> {
+    anchors
+        .iter()
+        .flat_map(|&a| lines.iter().map(move |&l| (l - a, l)))
+        .filter(|(d, _)| d.abs() <= threshold)
+        .min_by(|a, b| a.0.abs().total_cmp(&b.0.abs()))
+}
+
+fn round_to(v: f32, step: f32) -> f32 {
+    (v / step).round() * step
+}
+
+/// Snaps a rectangle being moved. Alignment (if enabled and something is close)
+/// takes priority over the grid on each axis. The result stays inside the canvas.
+pub fn snap_move(rect: RectPx, others: &[RectPx], canvas: (f32, f32), snap: Snap) -> Snapped {
+    let (mut x, mut y, w, h) = rect;
+    let mut out = Snapped::default();
+    for vertical in [false, true] {
+        let (pos, len, canvas_len) = if vertical { (y, h, canvas.1) } else { (x, w, canvas.0) };
+        let mut new = pos;
+        let mut aligned = None;
+        if snap.align {
+            let lines = alignment_lines(others, canvas_len, vertical);
+            aligned = nearest_shift(&[pos, pos + len / 2.0, pos + len], &lines, snap.threshold);
+        }
+        match (aligned, snap.grid) {
+            (Some((shift, line)), _) => {
+                new = pos + shift;
+                if vertical { out.guides_y.push(line) } else { out.guides_x.push(line) }
+            }
+            (None, Some(g)) if g > 0.0 => new = round_to(pos, g),
+            _ => {}
+        }
+        let new = new.clamp(0.0, (canvas_len - len).max(0.0));
+        if vertical { y = new } else { x = new }
+    }
+    out.rect = (x, y, w, h);
+    out
+}
+
+/// Snaps a rectangle being resized from its bottom-right corner (the top-left stays put).
+pub fn snap_resize(rect: RectPx, others: &[RectPx], canvas: (f32, f32), snap: Snap, min_size: f32) -> Snapped {
+    let (x, y, mut w, mut h) = rect;
+    let mut out = Snapped::default();
+    for vertical in [false, true] {
+        let (start, len, canvas_len) = if vertical { (y, h, canvas.1) } else { (x, w, canvas.0) };
+        let mut end = start + len;
+        let mut aligned = None;
+        if snap.align {
+            let lines = alignment_lines(others, canvas_len, vertical);
+            aligned = nearest_shift(&[end], &lines, snap.threshold);
+        }
+        match (aligned, snap.grid) {
+            (Some((shift, line)), _) => {
+                end += shift;
+                if vertical { out.guides_y.push(line) } else { out.guides_x.push(line) }
+            }
+            (None, Some(g)) if g > 0.0 => end = round_to(end, g),
+            _ => {}
+        }
+        let new_len = (end - start).clamp(min_size, (canvas_len - start).max(min_size));
+        if vertical { h = new_len } else { w = new_len }
+    }
+    out.rect = (x, y, w, h);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CANVAS: (f32, f32) = (1920.0, 1080.0);
+
+    #[test]
+    fn grid_rounds_position() {
+        let s = Snap { grid: Some(16.0), align: false, threshold: 0.0 };
+        let r = snap_move((101.0, 57.0, 300.0, 100.0), &[], CANVAS, s).rect;
+        assert_eq!((r.0, r.1), (96.0, 64.0));
+    }
+
+    #[test]
+    fn aligns_left_edge_to_another_graph() {
+        let s = Snap { grid: None, align: true, threshold: 10.0 };
+        let other = (500.0, 200.0, 400.0, 100.0);
+        let snapped = snap_move((506.0, 600.0, 300.0, 100.0), &[other], CANVAS, s);
+        assert_eq!(snapped.rect.0, 500.0);
+        assert_eq!(snapped.guides_x, vec![500.0]);
+    }
+
+    #[test]
+    fn aligns_centre_to_canvas_centre() {
+        let s = Snap { grid: None, align: true, threshold: 10.0 };
+        // Width 400, x 757 -> centre 957, canvas centre 960.
+        let r = snap_move((757.0, 300.0, 400.0, 100.0), &[], CANVAS, s).rect;
+        assert_eq!(r.0, 760.0);
+    }
+
+    #[test]
+    fn far_from_lines_falls_back_to_grid() {
+        let s = Snap { grid: Some(32.0), align: true, threshold: 5.0 };
+        let r = snap_move((300.0, 300.0, 100.0, 100.0), &[], CANVAS, s).rect;
+        assert_eq!((r.0, r.1), (288.0, 288.0));
+    }
+
+    #[test]
+    fn move_stays_inside_canvas() {
+        let s = Snap { grid: Some(16.0), align: false, threshold: 0.0 };
+        let r = snap_move((1900.0, -20.0, 300.0, 100.0), &[], CANVAS, s).rect;
+        assert_eq!((r.0, r.1), (1620.0, 0.0));
+    }
+
+    #[test]
+    fn resize_snaps_bottom_right_corner() {
+        let s = Snap { grid: Some(16.0), align: false, threshold: 0.0 };
+        let r = snap_resize((100.0, 100.0, 303.0, 205.0), &[], CANVAS, s, 20.0).rect;
+        assert_eq!((r.0, r.1, r.2, r.3), (100.0, 100.0, 300.0, 204.0));
+    }
+
+    #[test]
+    fn resize_aligns_right_edge_to_other_graph() {
+        let s = Snap { grid: None, align: true, threshold: 10.0 };
+        let other = (900.0, 0.0, 300.0, 100.0); // right edge at 1200
+        let r = snap_resize((100.0, 400.0, 1094.0, 100.0), &[other], CANVAS, s, 20.0).rect;
+        assert_eq!(r.2, 1100.0);
     }
 }
