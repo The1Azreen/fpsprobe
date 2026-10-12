@@ -7,7 +7,10 @@ GPU-accelerated frame-rate, frame-time and HDR brightness analysis for captured 
 fpsprobe is built for real-world console captures, such as HEVC recordings from an Elgato 4K X. These are compressed, so repeated frames are never bit-identical. Instead of counting a frame as new when any pixel changes, fpsprobe measures each video's own compression-noise floor and separates real motion from noise.
 
 <p align="center">
-  <img src="docs/media/overlay-fps-hdr.png" width="900" alt="Exported gameplay with FPS counter, FPS and frame-time graphs, HDR waveform, histogram and CIE chromaticity overlays">
+  <picture>
+    <source srcset="docs/media/overlay-fps-hdr.avif" type="image/avif">
+    <img src="docs/media/overlay-fps-hdr.png" width="900" alt="Exported gameplay with FPS counter, FPS and frame-time graphs, HDR waveform, histogram and CIE chromaticity overlays">
+  </picture>
 </p>
 
 <!-- MEDIA: swap the image above for this GIF once docs/media/demo-overlay.gif exists (see docs/media/README.md)
