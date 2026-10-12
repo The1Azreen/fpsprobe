@@ -8,7 +8,7 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
 
 <p align="center">
   <picture>
-    <source srcset="docs/media/overlay-fps-hdr.avif" type="image/avif">
+    <source srcset="https://raw.githubusercontent.com/The1Azreen/fpsprobe/master/docs/media/overlay-fps-hdr.avif" type="image/avif">
     <img src="docs/media/overlay-fps-hdr.png" width="900" alt="Exported gameplay with FPS counter, FPS and frame-time graphs, HDR waveform, histogram and CIE chromaticity overlays">
   </picture>
 </p>
