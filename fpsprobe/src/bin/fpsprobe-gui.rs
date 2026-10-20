@@ -413,13 +413,12 @@ impl App {
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Video");
-        if ui.button("Open video…").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
+        if ui.button("Open video…").clicked()
+            && let Some(path) = rfd::FileDialog::new()
                 .add_filter("Video", &["mp4", "mkv", "mov", "avi", "ts", "m2ts", "webm"])
                 .pick_file()
-            {
-                self.open_video(path);
-            }
+        {
+            self.open_video(path);
         }
         if let Some(p) = &self.input {
             ui.label(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
@@ -464,25 +463,23 @@ impl App {
             self.mark_layout_changed();
         }
         ui.horizontal(|ui| {
-            if ui.button("Save layout…").clicked() {
-                if let Some(path) =
+            if ui.button("Save layout…").clicked()
+                && let Some(path) =
                     rfd::FileDialog::new().add_filter("Layout", &["json"]).set_file_name("layout.json").save_file()
-                {
-                    if let Err(e) = self.settings.layout.save(&path) {
-                        self.report = format!("{e:#}");
-                    }
-                }
+                && let Err(e) = self.settings.layout.save(&path)
+            {
+                self.report = format!("{e:#}");
             }
-            if ui.button("Load layout…").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Layout", &["json"]).pick_file() {
-                    match Layout::load(&path) {
-                        Ok(l) => {
-                            self.settings.layout = l;
-                            self.selected = None;
-                            self.mark_layout_changed();
-                        }
-                        Err(e) => self.report = format!("{e:#}"),
+            if ui.button("Load layout…").clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("Layout", &["json"]).pick_file()
+            {
+                match Layout::load(&path) {
+                    Ok(l) => {
+                        self.settings.layout = l;
+                        self.selected = None;
+                        self.mark_layout_changed();
                     }
+                    Err(e) => self.report = format!("{e:#}"),
                 }
             }
         });
@@ -654,10 +651,10 @@ impl App {
             ui.label(format!("Save to: {dir}"));
         });
         ui.horizontal(|ui| {
-            if ui.button("Choose folder…").clicked() {
-                if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                    s.output_dir = Some(d);
-                }
+            if ui.button("Choose folder…").clicked()
+                && let Some(d) = rfd::FileDialog::new().pick_folder()
+            {
+                s.output_dir = Some(d);
             }
             if s.output_dir.is_some() && ui.button("Use video's folder").clicked() {
                 s.output_dir = None;
@@ -786,51 +783,48 @@ impl App {
                 None => {}
             }
         }
-        if response.drag_started() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if let Some((index, mode)) = hit(pos, &self.settings.layout.widgets) {
-                    let w = &self.settings.layout.widgets[index];
-                    self.selected = Some(index);
-                    if !self.settings.lock_layout && !w.locked {
-                        self.drag = Some(Drag { index, mode, start_pointer: pos, start: (w.x, w.y, w.w, w.h) });
-                    }
-                }
+        if response.drag_started()
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some((index, mode)) = hit(pos, &self.settings.layout.widgets)
+        {
+            let w = &self.settings.layout.widgets[index];
+            self.selected = Some(index);
+            if !self.settings.lock_layout && !w.locked {
+                self.drag = Some(Drag { index, mode, start_pointer: pos, start: (w.x, w.y, w.w, w.h) });
             }
         }
-        if response.dragged() {
-            if let (Some(d), Some(pos)) = (&self.drag, response.interact_pointer_pos()) {
-                // Work in canvas pixels so grid steps and alignment are exact.
-                let (cw, ch) = (tw as f32, th as f32);
-                let delta = pos - d.start_pointer;
-                let (dx, dy) = (delta.x / rect.width() * cw, delta.y / rect.height() * ch);
-                let (x, y, ww, wh) = (d.start.0 * cw, d.start.1 * ch, d.start.2 * cw, d.start.3 * ch);
-                let modifiers = ui.input(|i| i.modifiers);
-                let snap = Snap {
-                    grid: (self.settings.snap_always != modifiers.shift).then_some(self.settings.grid_px as f32),
-                    align: modifiers.ctrl || modifiers.command,
-                    threshold: 10.0 * cw / rect.width(),
-                };
-                let others: Vec<RectPx> = self
-                    .settings
-                    .layout
-                    .widgets
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, w)| *i != d.index && w.enabled)
-                    .map(|(_, w)| w.rect_px(cw, ch))
-                    .collect();
-                let snapped = match d.mode {
-                    DragMode::Move => snap_move((x + dx, y + dy, ww, wh), &others, (cw, ch), snap),
-                    DragMode::Resize => {
-                        snap_resize((x, y, ww + dx, wh + dy), &others, (cw, ch), snap, 0.02 * cw.min(ch))
-                    }
-                };
-                let (nx, ny, nw, nh) = snapped.rect;
-                let w = &mut self.settings.layout.widgets[d.index];
-                (w.x, w.y, w.w, w.h) = (nx / cw, ny / ch, nw / cw, nh / ch);
-                self.guides = (snapped.guides_x, snapped.guides_y);
-                self.layout_changed = true;
-            }
+        if response.dragged()
+            && let (Some(d), Some(pos)) = (&self.drag, response.interact_pointer_pos())
+        {
+            // Work in canvas pixels so grid steps and alignment are exact.
+            let (cw, ch) = (tw as f32, th as f32);
+            let delta = pos - d.start_pointer;
+            let (dx, dy) = (delta.x / rect.width() * cw, delta.y / rect.height() * ch);
+            let (x, y, ww, wh) = (d.start.0 * cw, d.start.1 * ch, d.start.2 * cw, d.start.3 * ch);
+            let modifiers = ui.input(|i| i.modifiers);
+            let snap = Snap {
+                grid: (self.settings.snap_always != modifiers.shift).then_some(self.settings.grid_px as f32),
+                align: modifiers.ctrl || modifiers.command,
+                threshold: 10.0 * cw / rect.width(),
+            };
+            let others: Vec<RectPx> = self
+                .settings
+                .layout
+                .widgets
+                .iter()
+                .enumerate()
+                .filter(|(i, w)| *i != d.index && w.enabled)
+                .map(|(_, w)| w.rect_px(cw, ch))
+                .collect();
+            let snapped = match d.mode {
+                DragMode::Move => snap_move((x + dx, y + dy, ww, wh), &others, (cw, ch), snap),
+                DragMode::Resize => snap_resize((x, y, ww + dx, wh + dy), &others, (cw, ch), snap, 0.02 * cw.min(ch)),
+            };
+            let (nx, ny, nw, nh) = snapped.rect;
+            let w = &mut self.settings.layout.widgets[d.index];
+            (w.x, w.y, w.w, w.h) = (nx / cw, ny / ch, nw / cw, nh / ch);
+            self.guides = (snapped.guides_x, snapped.guides_y);
+            self.layout_changed = true;
         }
         if response.drag_stopped() {
             self.drag = None;
@@ -951,10 +945,10 @@ impl App {
         if response.drag_started() {
             self.counter_drag = response.interact_pointer_pos().map(to_norm);
         }
-        if let (Some(start), Some(pos)) = (self.counter_drag, response.interact_pointer_pos()) {
-            if response.dragged() {
-                self.counter_sel = Some(Rect::from_two_pos(start, to_norm(pos)));
-            }
+        if let (Some(start), Some(pos)) = (self.counter_drag, response.interact_pointer_pos())
+            && response.dragged()
+        {
+            self.counter_sel = Some(Rect::from_two_pos(start, to_norm(pos)));
         }
         if response.drag_stopped() {
             self.counter_drag = None;

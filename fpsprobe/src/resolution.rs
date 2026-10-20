@@ -489,7 +489,9 @@ pub fn analyze(
     // flips by ~pi between consecutive frames.
     let field_alternation = (opts.kind == SourceKind::Interlaced).then(|| {
         let pairs: Vec<bool> = samples
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .filter_map(|p| {
                 let (a, b) = (p[0].y?, p[1].y?);
                 ((a.scale - b.scale).abs() < 0.05 * a.scale).then(|| {

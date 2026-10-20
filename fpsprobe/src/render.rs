@@ -101,14 +101,14 @@ fn hdr_panel_lut(transfer: Transfer) -> [u8; 256] {
         let e = match transfer {
             Transfer::Pq => {
                 let y = (linear * HDR_GRAPHICS_WHITE / 10000.0).max(0.0);
-                let (m1, m2, c1, c2, c3) = (0.1593017578125f32, 78.84375f32, 0.8359375f32, 18.8515625f32, 18.6875f32);
+                let (m1, m2, c1, c2, c3) = (0.159_301_76_f32, 78.84375f32, 0.8359375f32, 18.851_563_f32, 18.6875f32);
                 let yp = y.powf(m1);
                 ((c1 + c2 * yp) / (1.0 + c3 * yp)).powf(m2)
             }
             Transfer::Hlg => {
                 // Graphics white sits at 75% HLG signal (scene light 0.265).
                 let l = linear * 0.265;
-                if l <= 1.0 / 12.0 { (3.0 * l).sqrt() } else { 0.17883277 * (12.0 * l - 0.28466892).ln() + 0.55991073 }
+                if l <= 1.0 / 12.0 { (3.0 * l).sqrt() } else { 0.17883277 * (12.0 * l - 0.28466892).ln() + 0.559_910_7 }
             }
             Transfer::Sdr => linear.powf(1.0 / 2.2),
         };
@@ -122,7 +122,7 @@ enum PixelTransform {
     /// Premultiplied RGBA as drawn (FFmpeg overlay is told alpha=premultiplied).
     None,
     /// Premultiplied RGBA with colour channels re-encoded for an HDR output.
-    Hdr([u8; 256]),
+    Hdr(Box<[u8; 256]>),
     /// Straight (un-premultiplied) alpha, which editors expect from ProRes 4444.
     Straight,
 }
@@ -143,7 +143,7 @@ impl Sink {
             PixelTransform::Hdr(lut) => {
                 self.buf.clear();
                 self.buf.extend_from_slice(data);
-                for px in self.buf.chunks_exact_mut(4) {
+                for px in self.buf.as_chunks_mut::<4>().0 {
                     px[0] = lut[px[0] as usize];
                     px[1] = lut[px[1] as usize];
                     px[2] = lut[px[2] as usize];
@@ -153,7 +153,7 @@ impl Sink {
             PixelTransform::Straight => {
                 self.buf.clear();
                 self.buf.extend_from_slice(data);
-                for px in self.buf.chunks_exact_mut(4) {
+                for px in self.buf.as_chunks_mut::<4>().0 {
                     let a = px[3] as u32;
                     if a > 0 && a < 255 {
                         for c in &mut px[..3] {
@@ -207,7 +207,8 @@ fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<S
     cmd.arg(path);
     let mut child = cmd.stdin(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
     let stdin = child.stdin.take();
-    let transform = if hdr { PixelTransform::Hdr(hdr_panel_lut(info.color.transfer)) } else { PixelTransform::None };
+    let transform =
+        if hdr { PixelTransform::Hdr(Box::new(hdr_panel_lut(info.color.transfer))) } else { PixelTransform::None };
     Ok(Sink { canvas, child, stdin, transform, buf: Vec::new() })
 }
 

@@ -421,7 +421,7 @@ impl NitsGpu {
                 let stats = &wg[slot * self.wg_count * 4..(slot + 1) * self.wg_count * 4];
                 let mut f = NitsFrame::default();
                 let (mut sum, mut sum_lum) = (0f64, 0f64);
-                for g in stats.chunks_exact(4) {
+                for g in stats.as_chunks::<4>().0 {
                     f.peak = f.peak.max(g[0]);
                     sum += g[1] as f64;
                     f.peak_lum = f.peak_lum.max(g[2]);

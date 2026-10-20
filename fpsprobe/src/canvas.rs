@@ -80,7 +80,9 @@ const LOCUS: [(f32, f32); 41] = [
     (0.7190, 0.2809),
     (0.7347, 0.2653),
 ];
-const GAMUTS: [(&str, [(f32, f32); 3], [u8; 4]); 3] = [
+/// Name, primaries (x, y) and outline colour.
+type Gamut = (&'static str, [(f32, f32); 3], [u8; 4]);
+const GAMUTS: [Gamut; 3] = [
     ("Rec.709", [(0.64, 0.33), (0.30, 0.60), (0.15, 0.06)], [235, 235, 235, 170]),
     ("P3", [(0.68, 0.32), (0.265, 0.69), (0.15, 0.06)], [240, 210, 110, 150]),
     ("Rec.2020", [(0.708, 0.292), (0.170, 0.797), (0.131, 0.046)], [120, 220, 240, 150]),
@@ -423,7 +425,7 @@ impl Canvas {
                 if c == 0 {
                     continue;
                 }
-                let a = ((c as f32).ln_1p() / reference).min(1.0).max(0.15);
+                let a = ((c as f32).ln_1p() / reference).clamp(0.15, 1.0);
                 let (fx, fy) = place(bx, by);
                 let col = colors[by * XY_BINS + bx];
                 let rgba = [
@@ -563,7 +565,7 @@ impl Canvas {
         let data = self.pixmap.data_mut();
         for y in c.y..c.y + c.h {
             let row = (y * pw + c.x) * 4;
-            for px in data[row..row + c.w * 4].chunks_exact_mut(4) {
+            for px in data[row..row + c.w * 4].as_chunks_mut::<4>().0 {
                 px.copy_from_slice(&rgba);
             }
         }

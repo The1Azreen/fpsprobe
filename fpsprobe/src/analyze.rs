@@ -186,9 +186,9 @@ fn otsu(scores: &[f64]) -> Option<(f64, f64, f64)> {
     let total = logs.len() as f64;
     let sum_all: f64 = (0..BINS).map(|i| hist[i] * center(i)).sum();
     let (mut w0, mut sum0, mut best, mut best_i) = (0.0, 0.0, -1.0, 0);
-    for i in 0..BINS - 1 {
-        w0 += hist[i];
-        sum0 += hist[i] * center(i);
+    for (i, &h) in hist.iter().enumerate().take(BINS - 1) {
+        w0 += h;
+        sum0 += h * center(i);
         let w1 = total - w0;
         if w0 == 0.0 || w1 == 0.0 {
             continue;
