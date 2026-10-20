@@ -1,0 +1,35 @@
+name: Release
+
+# Push a tag like fpsprobe-v0.2.0 to publish a GitHub release with Windows binaries.
+# (Plain v* tags belong to the original trdrop history in this repository.)
+on:
+  push:
+    tags: ["fpsprobe-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: fpsprobe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fpsprobe
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/fpsprobe | Out-Null
+          Copy-Item target/release/fpsprobe.exe, target/release/fpsprobe-gui.exe, ../LICENSE, assets/fonts/OFL.txt dist/fpsprobe/
+          Compress-Archive -Path dist/fpsprobe/* -DestinationPath "dist/${{ github.ref_name }}-windows-x64.zip"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: fpsprobe/dist/*.zip
+          generate_release_notes: true
