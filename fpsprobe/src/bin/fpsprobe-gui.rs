@@ -10,8 +10,8 @@ use fpsprobe::layout::{Layout, RectPx, Snap, Widget, snap_move, snap_resize};
 use fpsprobe::nits::{HIST_BINS, NitsFrame, ScopeData, WAVE_COLS, WAVE_ROWS, XY_BINS};
 use fpsprobe::preview::FrameGrabber;
 use fpsprobe::progress::Progress;
-use fpsprobe::render::fps_series;
 use fpsprobe::resolution::{self, AxisEstimate, ResolutionOptions, ResolutionReport, SourceKind};
+use fpsprobe::timing::Timeline;
 use fpsprobe::video::{self, VideoInfo};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ use std::thread::JoinHandle;
 const PREVIEW_MAX_W: usize = 1280;
 const GRAPH_SIZES: [(&str, (usize, usize)); 4] =
     [("4K", (3840, 2160)), ("1440p", (2560, 1440)), ("1080p", (1920, 1080)), ("720p", (1280, 720))];
-const HWACCELS: [&str; 5] = ["d3d11va", "cuda", "qsv", "vulkan", "none"];
+const HWACCELS: [&str; 8] = ["auto", "d3d11va", "cuda", "qsv", "vulkan", "vaapi", "videotoolbox", "none"];
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -59,6 +59,13 @@ struct Settings {
     grid_px: u32,
     /// Prevents moving or resizing any graph.
     lock_layout: bool,
+    /// Count periodic capture-clock repeats as game frames.
+    fix_capture_drops: bool,
+    /// Experimental tear detection.
+    detect_tears: bool,
+    export_summary: bool,
+    /// Second capture drawn beside this one on the FPS and frame-time graphs.
+    compare: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -70,7 +77,7 @@ impl Default for Settings {
             export_video: true,
             export_graphs: false,
             graphs_size: (1920, 1080),
-            hwaccel: "d3d11va".into(),
+            hwaccel: "auto".into(),
             sdr_white: 100.0,
             auto_threshold: true,
             threshold: 1.5,
@@ -83,6 +90,10 @@ impl Default for Settings {
             snap_always: false,
             grid_px: 16,
             lock_layout: false,
+            fix_capture_drops: true,
+            detect_tears: false,
+            export_summary: false,
+            compare: None,
         }
     }
 }
@@ -256,6 +267,10 @@ impl App {
             csv: s.export_csv.then(|| dir.join(format!("{stem}_fps.csv"))),
             video: s.export_video.then(|| dir.join(format!("{stem}_analysis.mp4"))),
             graphs: s.export_graphs.then(|| (dir.join(format!("{stem}_graphs.mov")), s.graphs_size.0, s.graphs_size.1)),
+            summary_json: s.export_summary.then(|| dir.join(format!("{stem}_summary.json"))),
+            fix_capture_drops: s.fix_capture_drops,
+            tears: s.show_experimental && s.detect_tears,
+            compare: s.compare.clone(),
             nits_in_csv: s.csv_nits,
             hwaccel: (s.hwaccel != "none").then(|| s.hwaccel.clone()),
             threshold: (!s.auto_threshold).then_some(s.threshold),
@@ -507,6 +522,23 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.settings.sdr_white).range(50.0..=1000.0).speed(1.0));
             ui.end_row();
         });
+        ui.checkbox(&mut self.settings.fix_capture_drops, "Count capture-clock repeats as game frames").on_hover_text(
+            "Single repeated frames at a fixed interval come from a capture device running slightly fast, not from the game.",
+        );
+        ui.horizontal(|ui| {
+            let name = self.settings.compare.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy());
+            ui.label(format!("Compare with: {}", name.as_deref().unwrap_or("none")));
+            if ui.button("Choose…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Video", &["mp4", "mkv", "mov", "avi", "ts", "m2ts", "webm"])
+                    .pick_file()
+            {
+                self.settings.compare = Some(path);
+            }
+            if self.settings.compare.is_some() && ui.button("Clear").clicked() {
+                self.settings.compare = None;
+            }
+        });
         ui.label("Ignore regions (HUD, clocks): x,y,w,h; …");
         ui.text_edit_singleline(&mut self.settings.ignore);
 
@@ -520,6 +552,7 @@ impl App {
             self.counter = None;
         }
         if self.settings.show_experimental {
+            ui.checkbox(&mut self.settings.detect_tears, "Detect torn frames (experimental)");
             egui::CollapsingHeader::new("Experimental: internal resolution")
                 .default_open(false)
                 .show(ui, |ui| self.resolution_panel(ui));
@@ -637,6 +670,7 @@ impl App {
         });
         ui.checkbox(&mut s.export_video, "Video with graphs (.mp4, HDR kept)");
         ui.checkbox(&mut s.export_graphs, "Graphs only (ProRes 4444 + alpha .mov)");
+        ui.checkbox(&mut s.export_summary, "Summary (.json)");
         ui.horizontal(|ui| {
             ui.label("Graphs size");
             if graphs_size_picker(ui, &mut s.graphs_size, self.info.as_ref())
@@ -1198,7 +1232,7 @@ impl Demo {
             };
             is_new.push(new);
         }
-        let (fps, frametime_ms) = fps_series(&is_new, 60.0);
+        let (fps, frametime_ms) = Timeline::constant(60.0).fps_series(&is_new);
         let peak: Vec<f64> = (0..n).map(|i| 900.0 + 500.0 * ((i as f64) / 90.0).sin().abs()).collect();
         let avg: Vec<f64> = (0..n).map(|i| 110.0 + 25.0 * ((i as f64) / 140.0).cos()).collect();
         // A handful of distinct scope frames, cycled while animating.
@@ -1216,6 +1250,8 @@ impl Demo {
             capture_fps: 60.0,
             fps: &self.fps,
             frametime_ms: &self.frametime_ms,
+            compare_fps: None,
+            compare_frametime_ms: None,
             nits: Some(&self.nits[(frame / 8) % self.nits.len()]),
             peak_history: &self.peak,
             avg_history: &self.avg,

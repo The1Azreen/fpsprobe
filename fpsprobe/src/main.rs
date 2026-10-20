@@ -17,10 +17,14 @@ enum Backend {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Hwaccel {
+    /// First hardware decoder that works for the video, else software
+    Auto,
     D3d11va,
     Cuda,
     Qsv,
     Vulkan,
+    Vaapi,
+    Videotoolbox,
     None,
 }
 
@@ -45,6 +49,12 @@ struct Args {
     /// Render the graphs alone on a transparent background (ProRes 4444 .mov) for video editors
     #[arg(long)]
     graphs: Option<PathBuf>,
+    /// Write the summary (FPS, 1% lows, capture drops, nits...) to this JSON file
+    #[arg(long)]
+    summary_json: Option<PathBuf>,
+    /// Draw a second capture's FPS and frame time beside this one's (e.g. two consoles)
+    #[arg(long)]
+    compare: Option<PathBuf>,
     /// Size of the --graphs canvas, WIDTHxHEIGHT
     #[arg(long, default_value = "1920x1080", value_parser = parse_size)]
     graphs_size: (usize, usize),
@@ -61,7 +71,7 @@ struct Args {
     #[arg(long, value_enum, default_value_t = Backend::Gpu)]
     backend: Backend,
     /// FFmpeg hardware decoder
-    #[arg(long, value_enum, default_value_t = Hwaccel::D3d11va)]
+    #[arg(long, value_enum, default_value_t = Hwaccel::Auto)]
     hwaccel: Hwaccel,
     /// FFmpeg video encoder for --render (default: first working of hevc_nvenc, hevc_amf, hevc_qsv, libx264)
     #[arg(long)]
@@ -77,6 +87,13 @@ struct Args {
     /// Any 64x64 tile touching the region is excluded from scoring.
     #[arg(long = "ignore", value_parser = parse_rect)]
     ignore: Vec<[usize; 4]>,
+    /// Keep repeats caused by the capture clock as dropped frames instead of
+    /// counting them as game frames
+    #[arg(long)]
+    keep_capture_drops: bool,
+    /// EXPERIMENTAL: detect torn frames (approximate tear line, 64-pixel rows)
+    #[arg(long)]
+    tears: bool,
     /// Stop after this many frames
     #[arg(long)]
     max_frames: Option<usize>,
@@ -139,12 +156,13 @@ fn main() -> Result<()> {
         video: args.render,
         graphs: args.graphs.map(|p| (p, args.graphs_size.0, args.graphs_size.1)),
         nits_in_csv: args.nits,
+        summary_json: args.summary_json,
+        compare: args.compare,
+        fix_capture_drops: !args.keep_capture_drops,
+        tears: args.tears,
         hwaccel: match args.hwaccel {
-            Hwaccel::D3d11va => Some("d3d11va".into()),
-            Hwaccel::Cuda => Some("cuda".into()),
-            Hwaccel::Qsv => Some("qsv".into()),
-            Hwaccel::Vulkan => Some("vulkan".into()),
             Hwaccel::None => None,
+            hw => hw.to_possible_value().map(|v| v.get_name().to_string()),
         },
         encoder: args.encoder,
         use_gpu: args.backend == Backend::Gpu,

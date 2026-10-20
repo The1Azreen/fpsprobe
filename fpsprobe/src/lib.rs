@@ -5,6 +5,7 @@
 //! rendered as an overlay on the video and/or as a transparent graphs-only clip.
 
 pub mod analyze;
+pub mod cadence;
 pub mod canvas;
 pub mod export;
 mod gpu;
@@ -14,4 +15,5 @@ pub mod preview;
 pub mod progress;
 pub mod render;
 pub mod resolution;
+pub mod timing;
 pub mod video;

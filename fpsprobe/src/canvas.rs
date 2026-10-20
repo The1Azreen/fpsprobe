@@ -20,6 +20,9 @@ pub struct FrameData<'a> {
     pub fps: &'a [f64],
     /// Per-frame most recent frame time in ms.
     pub frametime_ms: &'a [f64],
+    /// A second capture's FPS and frame time at the same frames, drawn as a second line.
+    pub compare_fps: Option<&'a [f64]>,
+    pub compare_frametime_ms: Option<&'a [f64]>,
     pub nits: Option<&'a NitsFrame>,
     /// Per-frame luminance peak / average in nits (NaN = not measured).
     pub peak_history: &'a [f64],
@@ -87,6 +90,9 @@ const GAMUTS: [Gamut; 3] = [
     ("P3", [(0.68, 0.32), (0.265, 0.69), (0.15, 0.06)], [240, 210, 110, 150]),
     ("Rec.2020", [(0.708, 0.292), (0.170, 0.797), (0.131, 0.046)], [120, 220, 240, 150]),
 ];
+/// Line colours of the comparison capture.
+const COMPARE_FPS: [u8; 3] = [190, 130, 255];
+const COMPARE_FRAMETIME: [u8; 3] = [90, 190, 255];
 const CIE_X_RANGE: f32 = 0.8;
 const CIE_Y_RANGE: f32 = 0.9;
 
@@ -226,7 +232,13 @@ impl Canvas {
                 [30.0, 60.0, 120.0].into_iter().filter(|&g| g < max).map(|g| (g, format!("{g:.0}"))).collect();
             self.plot_frame(plot, s, &map, &guides, false);
         } else {
-            self.series(plot, s, d, w.history_seconds, &[(d.fps, [80, 220, 120])], &map);
+            const A: [u8; 3] = [80, 220, 120];
+            let mut lines = vec![(d.fps, A)];
+            if let Some(b) = d.compare_fps {
+                lines.push((b, COMPARE_FPS));
+                self.legend(r, s, A, COMPARE_FPS);
+            }
+            self.series(plot, s, d, w.history_seconds, &lines, &map);
         }
     }
 
@@ -244,8 +256,21 @@ impl Canvas {
                 .collect();
             self.plot_frame(plot, s, &map, &guides, false);
         } else {
-            self.series(plot, s, d, w.history_seconds, &[(d.frametime_ms, [255, 170, 60])], &map);
+            const A: [u8; 3] = [255, 170, 60];
+            let mut lines = vec![(d.frametime_ms, A)];
+            if let Some(b) = d.compare_frametime_ms {
+                lines.push((b, COMPARE_FRAMETIME));
+                self.legend(r, s, A, COMPARE_FRAMETIME);
+            }
+            self.series(plot, s, d, w.history_seconds, &lines, &map);
         }
+    }
+
+    /// "A  B" in the line colours at the top right of a graph, when comparing captures.
+    fn legend(&mut self, r: Rect, s: f32, a: [u8; 3], b: [u8; 3]) {
+        let base = r.y + 10.0 * s + 15.0 * s;
+        self.text("A", r.x + r.w - 56.0 * s, base, 18.0 * s, a);
+        self.text("B", r.x + r.w - 30.0 * s, base, 18.0 * s, b);
     }
 
     fn nits_readout(&mut self, r: Rect, s: f32, d: &FrameData) {

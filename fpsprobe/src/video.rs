@@ -57,6 +57,58 @@ pub fn probe(path: &Path) -> Result<VideoInfo> {
     })
 }
 
+/// Presentation time of every video frame in seconds from the first one, read from
+/// packet timestamps (demuxing only, no decoding). `None` when any timestamp is missing.
+pub fn frame_times(path: &Path) -> Result<Option<Vec<f64>>> {
+    let out = command("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .context("failed to run ffprobe (is FFmpeg installed and on PATH?)")?;
+    if !out.status.success() {
+        bail!("ffprobe failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let text = String::from_utf8(out.stdout)?;
+    let parsed: Option<Vec<f64>> =
+        text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| l.trim_end_matches(',').parse().ok()).collect();
+    let Some(mut times) = parsed.filter(|t| !t.is_empty()) else { return Ok(None) };
+    // Packets arrive in decode order; B-frames make that differ from presentation order.
+    times.sort_by(f64::total_cmp);
+    let first = times[0];
+    times.iter_mut().for_each(|t| *t -= first);
+    Ok(Some(times))
+}
+
+/// Hardware decoders worth trying on this platform, best first.
+const HWACCELS: &[&str] = if cfg!(windows) {
+    &["d3d11va", "cuda", "qsv"]
+} else if cfg!(target_os = "macos") {
+    &["videotoolbox"]
+} else {
+    &["cuda", "vaapi", "qsv", "vulkan"]
+};
+
+/// Resolves the decoder choice: "auto" becomes the first hardware decoder that can
+/// decode this video (or software decoding), anything else is passed through.
+pub fn resolve_hwaccel(choice: Option<&str>, input: &Path) -> Option<String> {
+    match choice {
+        Some("auto") => HWACCELS.iter().find(|hw| hw_decodes(input, hw)).map(|hw| hw.to_string()),
+        other => other.map(str::to_string),
+    }
+}
+
+/// FFmpeg quietly falls back to software decoding when a hardware decoder fails to
+/// initialise, so success means a clean exit with nothing printed at error level.
+fn hw_decodes(input: &Path, hw: &str) -> bool {
+    command("ffmpeg")
+        .args(["-v", "error", "-nostdin", "-hwaccel", hw, "-i"])
+        .arg(input)
+        .args(["-an", "-sn", "-frames:v", "3", "-f", "null", "-"])
+        .stdout(Stdio::null())
+        .output()
+        .is_ok_and(|o| o.status.success() && o.stderr.is_empty())
+}
+
 /// Builds a command for an FFmpeg tool without flashing a console window from the GUI.
 pub fn command(program: &str) -> Command {
     #[allow(unused_mut)]
@@ -70,8 +122,8 @@ pub fn command(program: &str) -> Command {
     cmd
 }
 
-/// Spawns FFmpeg decoding to raw `pix_fmt` frames cropped to `width`x`height`,
-/// and streams them over a channel.
+/// Spawns FFmpeg decoding to raw `pix_fmt` frames of `width`x`height` (cropped, or
+/// padded with black on the right and bottom), and streams them over a channel.
 pub fn spawn_decoder(
     input: &Path,
     hwaccel: Option<&str>,
@@ -85,12 +137,16 @@ pub fn spawn_decoder(
         cmd.args(["-hwaccel", hw]);
     }
     cmd.arg("-i").arg(input);
-    // Cropping keeps frames packable into u32 words on the GPU.
+    // Sizing keeps frames packable into u32 words on the GPU.
     // passthrough keeps FFmpeg from inserting or dropping frames, which would fake the result.
     cmd.args(["-an", "-sn", "-fps_mode", "passthrough", "-vf"])
-        .arg(format!("crop={width}:{height}:0:0,format={pix_fmt}"))
+        .arg(format!("pad=max(iw\\,{width}):max(ih\\,{height}):0:0,crop={width}:{height}:0:0,format={pix_fmt}"))
         .args(["-f", "rawvideo", "-pix_fmt", pix_fmt, "-"]);
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("failed to run ffmpeg")?;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to run ffmpeg (is FFmpeg installed and on PATH?)")?;
     let mut stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(8);
     std::thread::spawn(move || {

@@ -10,6 +10,7 @@ use crate::canvas::{Canvas, FrameData};
 use crate::layout::Layout;
 use crate::nits::{NitsFrame, NitsGpu, Transfer};
 use crate::progress::Progress;
+use crate::timing::Timeline;
 use crate::video::{self, VideoInfo};
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::VecDeque;
@@ -33,35 +34,27 @@ pub struct RenderJob<'a> {
     pub input: &'a Path,
     pub info: &'a VideoInfo,
     pub layout: &'a Layout,
-    /// New/duplicate flag for every frame, including frame 0.
-    pub is_new: &'a [bool],
+    pub timeline: &'a Timeline,
+    /// Per-frame FPS and frame time (see [`Timeline::fps_series`]), including frame 0.
+    pub fps: &'a [f64],
+    pub frametime_ms: &'a [f64],
+    pub compare: Option<Compare<'a>>,
     pub outputs: &'a [Output],
     pub hwaccel: Option<&'a str>,
     pub sdr_white: f32,
 }
 
-/// Per-frame FPS over a trailing one-second window (NaN until a full second has
-/// elapsed) and most recent frame time in ms.
-pub fn fps_series(is_new: &[bool], capture_fps: f64) -> (Vec<f64>, Vec<f64>) {
-    let window = capture_fps.round().max(1.0) as usize;
-    let mut fps = Vec::with_capacity(is_new.len());
-    let mut frametime_ms = Vec::with_capacity(is_new.len());
-    let mut in_window = 0usize;
-    let mut last_new = 0usize;
-    let mut last_ft = 1000.0 / capture_fps;
-    for i in 0..is_new.len() {
-        in_window += is_new[i] as usize;
-        if i >= window {
-            in_window -= is_new[i - window] as usize;
-        }
-        fps.push(if i + 1 >= window { in_window as f64 * capture_fps / window as f64 } else { f64::NAN });
-        if is_new[i] && i > 0 {
-            last_ft = (i - last_new) as f64 * 1000.0 / capture_fps;
-            last_new = i;
-        }
-        frametime_ms.push(last_ft);
+/// A second capture's FPS and frame time, sampled at this video's frames.
+#[derive(Clone, Copy)]
+pub struct Compare<'a> {
+    pub fps: &'a [f64],
+    pub frametime_ms: &'a [f64],
+}
+
+impl RenderJob<'_> {
+    fn frames(&self) -> usize {
+        self.fps.len()
     }
-    (fps, frametime_ms)
 }
 
 /// Picks the first hardware HEVC encoder that actually works on this machine,
@@ -188,14 +181,17 @@ fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<S
         "-i",
         "-",
     ]);
-    // Both streams start at t=0 so overlay frame N lands on video frame N.
+    // Both streams start at t=0 so overlay frame N lands on video frame N. With a
+    // variable frame rate the overlay runs at the nominal rate and each video frame
+    // takes the overlay frame nearest its timestamp, hence the half-frame shift.
     let (ov_fmt, out_fmt) = if hdr { ("yuv420p10", "yuv420p10le") } else { ("auto", "yuv420p") };
+    let shift = if job.timeline.is_variable() { format!("-{}/TB", 0.5 / info.fps) } else { String::new() };
     cmd.arg("-filter_complex").arg(format!(
-        "[0:v]setpts=PTS-STARTPTS[v0];[1:v]setpts=PTS-STARTPTS[ov];\
+        "[0:v]setpts=PTS-STARTPTS[v0];[1:v]setpts=PTS-STARTPTS{shift}[ov];\
          [v0][ov]overlay={bx}:{by}:alpha=premultiplied:eof_action=pass:format={ov_fmt},format={out_fmt}[v]"
     ));
     cmd.args(["-map", "[v]", "-map", "0:a?", "-c:a", "aac", "-b:a", "256k"]);
-    cmd.args(["-frames:v", &job.is_new.len().to_string(), "-c:v", &encoder]);
+    cmd.args(["-frames:v", &job.frames().to_string(), "-c:v", &encoder]);
     cmd.args(encoder_args(&encoder));
     if hdr {
         let trc = if info.color.transfer == Transfer::Hlg { "arib-std-b67" } else { "smpte2084" };
@@ -218,7 +214,7 @@ fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Res
     cmd.args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
         .arg(format!("{width}x{height}"))
         .args(["-framerate", &job.info.fps.to_string(), "-i", "-"]);
-    cmd.args(["-frames:v", &job.is_new.len().to_string()]);
+    cmd.args(["-frames:v", &job.timeline.slots(job.frames()).last().map_or(0, |s| s + 1).to_string()]);
     cmd.args(["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"]);
     cmd.args(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]);
     cmd.arg(path);
@@ -284,7 +280,6 @@ pub fn spawn_nits_worker(
 /// scope data) when the layout needed them.
 pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFrame>>> {
     let info = job.info;
-    let (fps, frametime_ms) = fps_series(job.is_new, info.fps);
     let wants_nits = job.layout.needs_nits();
 
     let mut sinks = Vec::new();
@@ -301,27 +296,42 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
         None
     };
 
-    progress.stage("Rendering", job.is_new.len());
+    // Outputs run at the nominal rate; with a variable frame rate a source frame can
+    // cover several output frames (or none), so frames are drawn per output slot.
+    let slots = job.timeline.slots(job.frames());
+    let total_slots = slots.last().map_or(0, |s| s + 1);
+    progress.stage("Rendering", total_slots);
     let mut measured: Vec<NitsFrame> = Vec::new();
     let (mut peak_hist, mut avg_hist) = (Vec::new(), Vec::new());
     let mut max_cll = 0f32;
     let mut failed = false;
-    for frame in 0..job.is_new.len() {
+    let mut current: Option<NitsFrame> = None;
+    let mut next = 0usize;
+    for slot in 0..total_slots {
         if progress.is_cancelled() {
             break;
         }
-        let nf = worker.as_ref().and_then(|(frames, _)| frames.recv().ok());
-        if let Some(f) = &nf {
-            max_cll = max_cll.max(f.peak);
+        while next < slots.len() && slots[next] <= slot {
+            let nf = worker.as_ref().and_then(|(frames, _)| frames.recv().ok());
+            if let Some(f) = &nf {
+                max_cll = max_cll.max(f.peak);
+            }
+            peak_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.peak_lum as f64));
+            avg_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.avg_lum as f64));
+            if let Some(mut f) = std::mem::replace(&mut current, nf) {
+                f.scopes = None;
+                measured.push(f);
+            }
+            next += 1;
         }
-        peak_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.peak_lum as f64));
-        avg_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.avg_lum as f64));
         let data = FrameData {
-            frame,
+            frame: next - 1,
             capture_fps: info.fps,
-            fps: &fps,
-            frametime_ms: &frametime_ms,
-            nits: nf.as_ref(),
+            fps: job.fps,
+            frametime_ms: job.frametime_ms,
+            compare_fps: job.compare.map(|c| c.fps),
+            compare_frametime_ms: job.compare.map(|c| c.frametime_ms),
+            nits: current.as_ref(),
             peak_history: &peak_hist,
             avg_history: &avg_hist,
             max_cll,
@@ -336,11 +346,11 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
         if failed {
             break;
         }
-        if let Some(mut f) = nf {
-            f.scopes = None;
-            measured.push(f);
-        }
         progress.advance();
+    }
+    if let Some(mut f) = current.take() {
+        f.scopes = None;
+        measured.push(f);
     }
 
     let mut ffmpeg_ok = true;
