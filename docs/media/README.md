@@ -11,6 +11,7 @@ Screenshots and GIFs used by the main [README](../../README.md). Add each file w
 | `gui-drag-resize.gif` | Dragging a graph to a new position, then resizing it by its corner. | 900 px wide, 15 fps, under 10 s | to do |
 | `hdr-scopes-grid.png` | A frame from a graphs-only export using the "HDR scopes grid" preset, from an HDR recording. | 1920×1080 | to do |
 | `overlay-fps-hdr.png` | A frame from an exported video using the "FPS + HDR" preset. | 1920×1080 | done (header image until the GIF exists) |
+| `overlay-fps-sdr.png` | A frame from an SDR export with the default FPS and frame-time overlay. | 1920×1080 | done |
 
 Keep each file under about 10 MB. GitHub shows larger GIFs slowly or not at all.
 
