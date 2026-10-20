@@ -170,7 +170,8 @@ impl Sink {
 
 fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<Sink> {
     let info = job.info;
-    let (bx, by, bw, bh) = job.layout.bounds_px(info.width as f32, info.height as f32).context("no graphs are enabled")?;
+    let (bx, by, bw, bh) =
+        job.layout.bounds_px(info.width as f32, info.height as f32).context("no graphs are enabled")?;
     let canvas = Canvas::new(info.width, info.height, (bx, by, bw, bh))?;
     let hdr = info.color.is_hdr();
     let encoder = encoder.map(str::to_string).unwrap_or_else(|| pick_encoder(hdr));
@@ -181,9 +182,12 @@ fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<S
         cmd.args(["-hwaccel", hw]);
     }
     cmd.arg("-i").arg(job.input);
-    cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
-        .arg(format!("{bw}x{bh}"))
-        .args(["-framerate", &info.fps.to_string(), "-i", "-"]);
+    cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"]).arg(format!("{bw}x{bh}")).args([
+        "-framerate",
+        &info.fps.to_string(),
+        "-i",
+        "-",
+    ]);
     // Both streams start at t=0 so overlay frame N lands on video frame N.
     let (ov_fmt, out_fmt) = if hdr { ("yuv420p10", "yuv420p10le") } else { ("auto", "yuv420p") };
     cmd.arg("-filter_complex").arg(format!(

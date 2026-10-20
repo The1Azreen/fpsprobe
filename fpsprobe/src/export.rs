@@ -62,17 +62,16 @@ pub struct ExportReport {
 pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
     let info = video::probe(&job.input)?;
     let hwaccel = job.hwaccel.as_deref();
-    let mut summary = format!(
-        "input: {}x{} @ {:.3} fps, {}\n",
-        info.width,
-        info.height,
-        info.fps,
-        info.color.describe()
-    );
+    let mut summary =
+        format!("input: {}x{} @ {:.3} fps, {}\n", info.width, info.height, info.fps, info.color.describe());
 
     let start = Instant::now();
-    let diff_opts =
-        DiffOptions { hwaccel, use_gpu: job.use_gpu, pixel_difference: job.pixel_difference, max_frames: job.max_frames };
+    let diff_opts = DiffOptions {
+        hwaccel,
+        use_gpu: job.use_gpu,
+        pixel_difference: job.pixel_difference,
+        max_frames: job.max_frames,
+    };
     let (stats, frames) = analyze::run_diff(&job.input, &info, &diff_opts, progress)?;
     summary += &format!("analysed {frames} frames in {:.1}s\n", start.elapsed().as_secs_f64());
     let geo = Geometry::for_video(&info);
@@ -120,7 +119,8 @@ pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
         peaks.sort_by(f32::total_cmp);
         let pct = |q: f64| peaks[((peaks.len() - 1) as f64 * q).round() as usize];
         let avg_lum = n.iter().map(|f| f.avg_lum as f64).sum::<f64>() / n.len() as f64;
-        summary += &format!("peak luminance   {:>10.0} nits  (brightest frame; median frame {:.0})\n", pct(1.0), pct(0.5));
+        summary +=
+            &format!("peak luminance   {:>10.0} nits  (brightest frame; median frame {:.0})\n", pct(1.0), pct(0.5));
         summary += &format!("avg luminance    {avg_lum:>10.0} nits  (whole clip)\n");
         summary += &format!("MaxCLL           {max_cll:>10.0} nits  (HDR metadata: brightest max(R,G,B) pixel)\n");
         summary += &format!("MaxFALL          {max_fall:>10.0} nits  (HDR metadata: brightest frame average)\n");
@@ -162,10 +162,16 @@ pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
 }
 
 /// Nits measurement pass without rendering.
-fn measure_nits(job: &ExportJob, info: &video::VideoInfo, max_frames: usize, progress: &Progress) -> Result<Vec<NitsFrame>> {
+fn measure_nits(
+    job: &ExportJob,
+    info: &video::VideoInfo,
+    max_frames: usize,
+    progress: &Progress,
+) -> Result<Vec<NitsFrame>> {
     let (w, h) = (info.width / 4 * 4, info.height / 2 * 2);
     let mut gpu = NitsGpu::new(w, h, info.color, job.sdr_white, 0)?;
-    let (rx, mut child) = video::spawn_decoder(&job.input, job.hwaccel.as_deref(), (w, h), "yuv420p10le", gpu.frame_bytes())?;
+    let (rx, mut child) =
+        video::spawn_decoder(&job.input, job.hwaccel.as_deref(), (w, h), "yuv420p10le", gpu.frame_bytes())?;
     progress.stage("Measuring nits", max_frames);
     let mut out = Vec::new();
     for frame in rx.into_iter().take(max_frames) {

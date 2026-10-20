@@ -52,8 +52,10 @@ impl GpuDiff {
 
         let frame_bytes = geo.frame_bytes() as u64;
         let mut limits = wgpu::Limits::default();
-        limits.max_storage_buffer_binding_size =
-            limits.max_storage_buffer_binding_size.max(frame_bytes).min(adapter.limits().max_storage_buffer_binding_size);
+        limits.max_storage_buffer_binding_size = limits
+            .max_storage_buffer_binding_size
+            .max(frame_bytes)
+            .min(adapter.limits().max_storage_buffer_binding_size);
         limits.max_buffer_size = limits.max_buffer_size.max(frame_bytes).min(adapter.limits().max_buffer_size);
         if limits.max_storage_buffer_binding_size < frame_bytes {
             return Err(anyhow!("frame of {frame_bytes} bytes exceeds GPU storage buffer limit"));

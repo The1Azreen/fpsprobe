@@ -333,7 +333,8 @@ impl NitsGpu {
     pub fn push(&mut self, frame: &[u8]) -> Result<Vec<NitsFrame>> {
         let slot = self.pending;
         let words = self.layout.words;
-        let params = Params { wg_base: (slot * self.wg_count * 4) as u32, scope_base: (slot * words) as u32, ..self.base };
+        let params =
+            Params { wg_base: (slot * self.wg_count * 4) as u32, scope_base: (slot * words) as u32, ..self.base };
         let params_offset = slot as u64 * self.params_stride;
         self.queue.write_buffer(&self.params, params_offset, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.frame, 0, frame);

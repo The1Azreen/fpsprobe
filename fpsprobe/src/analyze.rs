@@ -94,10 +94,16 @@ pub struct DiffOptions<'a> {
 
 /// Decodes the video as 8-bit luma and compares each frame with the previous one.
 /// Returns per-frame stats (frame 1 onwards) and the number of decoded frames.
-pub fn run_diff(input: &Path, info: &VideoInfo, opts: &DiffOptions, progress: &Progress) -> Result<(Vec<FrameStats>, usize)> {
+pub fn run_diff(
+    input: &Path,
+    info: &VideoInfo,
+    opts: &DiffOptions,
+    progress: &Progress,
+) -> Result<(Vec<FrameStats>, usize)> {
     let geo = Geometry::for_video(info);
     let mut gpu = if opts.use_gpu { Some(GpuDiff::new(geo, opts.pixel_difference)?) } else { None };
-    let (rx, mut child) = video::spawn_decoder(input, opts.hwaccel, (geo.width, geo.height), "gray", geo.frame_bytes())?;
+    let (rx, mut child) =
+        video::spawn_decoder(input, opts.hwaccel, (geo.width, geo.height), "gray", geo.frame_bytes())?;
     progress.stage("Analysing frame pacing", opts.max_frames.or(info.estimated_frames()).unwrap_or(0));
     let mut stats: Vec<FrameStats> = Vec::new();
     let mut prev: Option<Vec<u8>> = None;
@@ -240,8 +246,7 @@ fn summarize(new_flags: &[bool], capture_fps: f64) -> Summary {
     let window = capture_fps.round().max(1.0) as usize;
     let all: Vec<bool> = std::iter::once(true).chain(new_flags.iter().copied()).collect();
     let min_1s_fps = if all.len() >= window {
-        all.windows(window).map(|w| w.iter().filter(|&&n| n).count()).min().unwrap_or(0) as f64
-            * capture_fps
+        all.windows(window).map(|w| w.iter().filter(|&&n| n).count()).min().unwrap_or(0) as f64 * capture_fps
             / window as f64
     } else {
         f64::NAN
@@ -268,17 +273,35 @@ pub fn summary_text(a: &Analysis, capture_fps: f64, stats: &[FrameStats]) -> Str
     let c = summarize(&compat, capture_fps);
     let total = new.len() + 1;
     let mut out = String::new();
-    out += &format!("threshold        {:.3} ({})
-", a.threshold, a.threshold_source);
-    out += &format!("                 {:>10} {:>14}
-", "fpsprobe", "trdrop-rule");
-    out += &format!("unique frames    {:>10} {:>14}   of {total}
-", s.unique, c.unique);
-    out += &format!("average fps      {:>10.2} {:>14.2}
-", s.avg_fps, c.avg_fps);
-    out += &format!("min 1s fps       {:>10.2} {:>14.2}
-", s.min_1s_fps, c.min_1s_fps);
-    out += &format!("1% low fps       {:>10.2} {:>14.2}
-", s.low_1pct_fps, c.low_1pct_fps);
+    out += &format!(
+        "threshold        {:.3} ({})
+",
+        a.threshold, a.threshold_source
+    );
+    out += &format!(
+        "                 {:>10} {:>14}
+",
+        "fpsprobe", "trdrop-rule"
+    );
+    out += &format!(
+        "unique frames    {:>10} {:>14}   of {total}
+",
+        s.unique, c.unique
+    );
+    out += &format!(
+        "average fps      {:>10.2} {:>14.2}
+",
+        s.avg_fps, c.avg_fps
+    );
+    out += &format!(
+        "min 1s fps       {:>10.2} {:>14.2}
+",
+        s.min_1s_fps, c.min_1s_fps
+    );
+    out += &format!(
+        "1% low fps       {:>10.2} {:>14.2}
+",
+        s.low_1pct_fps, c.low_1pct_fps
+    );
     out
 }

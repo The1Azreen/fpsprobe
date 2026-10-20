@@ -151,7 +151,8 @@ fn axis_profile(
     if rw < 3 || rh < 3 {
         return e;
     }
-    let masked = |x: usize, y: usize| mask.iter().any(|&[mx, my, mw, mh]| x >= mx && x < mx + mw && y >= my && y < my + mh);
+    let masked =
+        |x: usize, y: usize| mask.iter().any(|&[mx, my, mw, mh]| x >= mx && x < mx + mw && y >= my && y < my + mh);
     for y in ry..ry + rh {
         let row = &luma[y * width..(y + 1) * width];
         for x in rx..rx + rw {
@@ -159,13 +160,21 @@ fn axis_profile(
                 if x == rx || x + 1 == rx + rw {
                     continue;
                 }
-                if second { row[x - 1] as i32 - 2 * row[x] as i32 + row[x + 1] as i32 } else { row[x] as i32 - row[x - 1] as i32 }
+                if second {
+                    row[x - 1] as i32 - 2 * row[x] as i32 + row[x + 1] as i32
+                } else {
+                    row[x] as i32 - row[x - 1] as i32
+                }
             } else {
                 if y == ry || y + 1 == ry + rh {
                     continue;
                 }
                 let above = luma[(y - 1) * width + x] as i32;
-                if second { above - 2 * row[x] as i32 + luma[(y + 1) * width + x] as i32 } else { row[x] as i32 - above }
+                if second {
+                    above - 2 * row[x] as i32 + luma[(y + 1) * width + x] as i32
+                } else {
+                    row[x] as i32 - above
+                }
             };
             if d != 0 && (mask.is_empty() || !masked(x, y)) {
                 let i = if along_x { x - rx } else { y - ry };
@@ -231,7 +240,12 @@ fn find_period(s: &[f64], band: (f64, f64)) -> Option<(f64, f64, f64)> {
     }
     // Local maxima that are at least a quarter of the strongest peak.
     let peak = (1..power.len().saturating_sub(1))
-        .find(|&k| power[k] >= power[k - 1] && power[k] >= power[k + 1] && power[k] >= 0.25 * max && power[k] / median >= MIN_CONFIDENCE)
+        .find(|&k| {
+            power[k] >= power[k - 1]
+                && power[k] >= power[k + 1]
+                && power[k] >= 0.25 * max
+                && power[k] / median >= MIN_CONFIDENCE
+        })
         .or_else(|| (power[power.len() - 1] >= 0.25 * max).then(|| power.len() - 1))?;
     // Parabolic refinement of the peak position.
     let offset = if peak > 0 && peak + 1 < power.len() {
@@ -295,7 +309,8 @@ fn find_scale_comb(s: &[f64]) -> Option<(f64, f64, f64)> {
     let base = p;
     for m in 2..=(16.0 / base).floor() as usize {
         let q = base * m as f64;
-        let added: Vec<f64> = (1..=((0.5 * q).floor() as usize).min(16)).filter(|k| k % m != 0).map(|k| power(k as f64 / q)).collect();
+        let added: Vec<f64> =
+            (1..=((0.5 * q).floor() as usize).min(16)).filter(|k| k % m != 0).map(|k| power(k as f64 / q)).collect();
         if !added.is_empty() && added.iter().sum::<f64>() / added.len() as f64 >= 0.25 * score {
             p = q;
         }
@@ -323,7 +338,8 @@ fn estimate_axis(profile: &[f64], kind: SourceKind, full_len: usize) -> Option<A
     let fraction = kind.native_fraction(f);
     let scale = 1.0 / fraction;
     let rounded = scale.round();
-    let integer = (kind != SourceKind::Modern && rounded >= 2.0 && (scale - rounded).abs() < 0.04).then_some(rounded as u32);
+    let integer =
+        (kind != SourceKind::Modern && rounded >= 2.0 && (scale - rounded).abs() < 0.04).then_some(rounded as u32);
     let native = match integer {
         Some(n) => full_len as f64 / n as f64,
         None => full_len as f64 * fraction,
@@ -381,7 +397,12 @@ pub fn grab_luma(input: &Path, info: &VideoInfo, time: f64) -> Result<Vec<u8>> {
 
 // ---- whole-video analysis -------------------------------------------------------
 
-pub fn analyze(input: &Path, info: &VideoInfo, opts: &ResolutionOptions, progress: &Progress) -> Result<ResolutionReport> {
+pub fn analyze(
+    input: &Path,
+    info: &VideoInfo,
+    opts: &ResolutionOptions,
+    progress: &Progress,
+) -> Result<ResolutionReport> {
     let (w, h) = (info.width, info.height);
     let rate = opts.samples_per_second.clamp(0.05, info.fps);
     // Interlaced: pairs of consecutive frames, to compare their field phase.
@@ -519,7 +540,12 @@ impl ResolutionReport {
                     None => format!("x{:.3}", a.scale),
                 };
                 let codec = if a.codec_aligned { ", matches encoder block grid" } else { "" };
-                format!("{name:<16} {:.0} px  (scale {scale}, confidence {} {:.0}{codec})\n", a.native, a.confidence_label(), a.confidence)
+                format!(
+                    "{name:<16} {:.0} px  (scale {scale}, confidence {} {:.0}{codec})\n",
+                    a.native,
+                    a.confidence_label(),
+                    a.confidence
+                )
             }
             None => format!("{name:<16} no upscaling pattern found (native, or hidden by filtering/compression)\n"),
         };
@@ -561,7 +587,12 @@ impl ResolutionReport {
                 // frames combined (both fields interleaved over time).
                 let per_frame = self.confident(true);
                 if !per_frame.is_empty() {
-                    out += &format!("{:<16} {:.0} lines per displayed frame (median of {} frames)\n", "native height", percentile(&per_frame, 0.5), per_frame.len());
+                    out += &format!(
+                        "{:<16} {:.0} lines per displayed frame (median of {} frames)\n",
+                        "native height",
+                        percentile(&per_frame, 0.5),
+                        per_frame.len()
+                    );
                 }
                 out += &describe(&self.overall_y, "both fields");
             }

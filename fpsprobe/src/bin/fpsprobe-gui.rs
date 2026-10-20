@@ -7,8 +7,8 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use fpsprobe::canvas::{Canvas, FrameData};
 use fpsprobe::export::{self, ExportJob, ExportReport};
 use fpsprobe::layout::{Layout, RectPx, Snap, Widget, snap_move, snap_resize};
-use fpsprobe::preview::FrameGrabber;
 use fpsprobe::nits::{HIST_BINS, NitsFrame, ScopeData, WAVE_COLS, WAVE_ROWS, XY_BINS};
+use fpsprobe::preview::FrameGrabber;
 use fpsprobe::progress::Progress;
 use fpsprobe::render::fps_series;
 use fpsprobe::resolution::{self, AxisEstimate, ResolutionOptions, ResolutionReport, SourceKind};
@@ -329,8 +329,10 @@ impl App {
         }
         let image = egui::ColorImage::from_rgba_unmultiplied([rw, rh], &rgba);
         let tex = ctx.load_texture("pixel-counter", image, egui::TextureOptions::NEAREST);
-        let (steps, run, vertical) = self.counter.as_ref().map_or((10.0, rw as f64, true), |c| (c.steps, c.run, c.vertical));
-        self.counter = Some(Counter { tex, region: (x0, y0, rw, rh), full, x: ex, y: ey, steps, run, vertical, open: true });
+        let (steps, run, vertical) =
+            self.counter.as_ref().map_or((10.0, rw as f64, true), |c| (c.steps, c.run, c.vertical));
+        self.counter =
+            Some(Counter { tex, region: (x0, y0, rw, rh), full, x: ex, y: ey, steps, run, vertical, open: true });
     }
 
     fn poll_job(&mut self, ctx: &egui::Context) {
@@ -412,8 +414,9 @@ impl App {
     fn left_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Video");
         if ui.button("Open video…").clicked() {
-            if let Some(path) =
-                rfd::FileDialog::new().add_filter("Video", &["mp4", "mkv", "mov", "avi", "ts", "m2ts", "webm"]).pick_file()
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Video", &["mp4", "mkv", "mov", "avi", "ts", "m2ts", "webm"])
+                .pick_file()
             {
                 self.open_video(path);
             }
@@ -462,7 +465,9 @@ impl App {
         }
         ui.horizontal(|ui| {
             if ui.button("Save layout…").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Layout", &["json"]).set_file_name("layout.json").save_file() {
+                if let Some(path) =
+                    rfd::FileDialog::new().add_filter("Layout", &["json"]).set_file_name("layout.json").save_file()
+                {
                     if let Err(e) = self.settings.layout.save(&path) {
                         self.report = format!("{e:#}");
                     }
@@ -509,14 +514,18 @@ impl App {
         ui.text_edit_singleline(&mut self.settings.ignore);
 
         ui.separator();
-        if ui.checkbox(&mut self.settings.show_experimental, "Show experimental features").changed() && !self.settings.show_experimental {
+        if ui.checkbox(&mut self.settings.show_experimental, "Show experimental features").changed()
+            && !self.settings.show_experimental
+        {
             // Hiding the section also leaves pixel-counter mode.
             self.counter_mode = false;
             self.counter_sel = None;
             self.counter = None;
         }
         if self.settings.show_experimental {
-            egui::CollapsingHeader::new("Experimental: internal resolution").default_open(false).show(ui, |ui| self.resolution_panel(ui));
+            egui::CollapsingHeader::new("Experimental: internal resolution")
+                .default_open(false)
+                .show(ui, |ui| self.resolution_panel(ui));
         }
     }
 
@@ -626,17 +635,22 @@ impl App {
         ui.heading("Export");
         let s = &mut self.settings;
         ui.checkbox(&mut s.export_csv, "CSV (per-frame data)");
-        ui.indent("csvnits", |ui| ui.add_enabled(s.export_csv, egui::Checkbox::new(&mut s.csv_nits, "include nits columns")));
+        ui.indent("csvnits", |ui| {
+            ui.add_enabled(s.export_csv, egui::Checkbox::new(&mut s.csv_nits, "include nits columns"))
+        });
         ui.checkbox(&mut s.export_video, "Video with graphs (.mp4, HDR kept)");
         ui.checkbox(&mut s.export_graphs, "Graphs only (ProRes 4444 + alpha .mov)");
         ui.horizontal(|ui| {
             ui.label("Graphs size");
-            if graphs_size_picker(ui, &mut s.graphs_size, self.info.as_ref()) && s.preview_target == PreviewTarget::Graphs {
+            if graphs_size_picker(ui, &mut s.graphs_size, self.info.as_ref())
+                && s.preview_target == PreviewTarget::Graphs
+            {
                 self.layout_changed = true;
             }
         });
         ui.horizontal(|ui| {
-            let dir = s.output_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "next to the video".into());
+            let dir =
+                s.output_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "next to the video".into());
             ui.label(format!("Save to: {dir}"));
         });
         ui.horizontal(|ui| {
@@ -721,7 +735,11 @@ impl App {
         let (tw, th) = self.target_size();
         let avail = ui.available_size();
         let aspect = tw as f32 / th as f32;
-        let size = if avail.x / avail.y > aspect { Vec2::new(avail.y * aspect, avail.y) } else { Vec2::new(avail.x, avail.x / aspect) };
+        let size = if avail.x / avail.y > aspect {
+            Vec2::new(avail.y * aspect, avail.y)
+        } else {
+            Vec2::new(avail.x, avail.x / aspect)
+        };
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
         let rect = response.rect;
 
@@ -803,7 +821,9 @@ impl App {
                     .collect();
                 let snapped = match d.mode {
                     DragMode::Move => snap_move((x + dx, y + dy, ww, wh), &others, (cw, ch), snap),
-                    DragMode::Resize => snap_resize((x, y, ww + dx, wh + dy), &others, (cw, ch), snap, 0.02 * cw.min(ch)),
+                    DragMode::Resize => {
+                        snap_resize((x, y, ww + dx, wh + dy), &others, (cw, ch), snap, 0.02 * cw.min(ch))
+                    }
                 };
                 let (nx, ny, nw, nh) = snapped.rect;
                 let w = &mut self.settings.layout.widgets[d.index];
@@ -818,7 +838,8 @@ impl App {
         }
         self.nudge_selected(ui, (tw, th));
         if response.clicked() {
-            self.selected = response.interact_pointer_pos().and_then(|p| hit(p, &self.settings.layout.widgets)).map(|(i, _)| i);
+            self.selected =
+                response.interact_pointer_pos().and_then(|p| hit(p, &self.settings.layout.widgets)).map(|(i, _)| i);
         }
 
         // While dragging: the grid (when snapping to it) and the alignment lines in use.
@@ -865,10 +886,20 @@ impl App {
                 (false, false) => Color32::from_white_alpha(70),
             };
             painter.rect_stroke(r, 0.0, Stroke::new(if selected { 2.0 } else { 1.0 }, color), StrokeKind::Inside);
-            painter.rect_filled(Rect::from_center_size(r.max - Vec2::splat(handle_size / 2.0), Vec2::splat(handle_size)), 2.0, color);
+            painter.rect_filled(
+                Rect::from_center_size(r.max - Vec2::splat(handle_size / 2.0), Vec2::splat(handle_size)),
+                2.0,
+                color,
+            );
             if selected {
                 let label = if locked { format!("{} (locked)", w.kind.label()) } else { w.kind.label().to_string() };
-                painter.text(r.min + Vec2::new(4.0, -14.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(12.0), color);
+                painter.text(
+                    r.min + Vec2::new(4.0, -14.0),
+                    egui::Align2::LEFT_TOP,
+                    label,
+                    egui::FontId::proportional(12.0),
+                    color,
+                );
             }
         }
     }
@@ -884,7 +915,11 @@ impl App {
         }
         let (mut dx, mut dy, shift) = ui.input(|i| {
             let k = |key| i.key_pressed(key) as i32 as f32;
-            (k(egui::Key::ArrowRight) - k(egui::Key::ArrowLeft), k(egui::Key::ArrowDown) - k(egui::Key::ArrowUp), i.modifiers.shift)
+            (
+                k(egui::Key::ArrowRight) - k(egui::Key::ArrowLeft),
+                k(egui::Key::ArrowDown) - k(egui::Key::ArrowUp),
+                i.modifiers.shift,
+            )
         });
         if dx == 0.0 && dy == 0.0 {
             return;
@@ -899,8 +934,19 @@ impl App {
     }
 
     /// Pixel-counter mode: dragging selects a region; releasing analyses it.
-    fn counter_interaction(&mut self, ctx: &egui::Context, response: &egui::Response, rect: Rect, painter: &egui::Painter) {
-        let to_norm = |p: Pos2| Pos2::new(((p.x - rect.min.x) / rect.width()).clamp(0.0, 1.0), ((p.y - rect.min.y) / rect.height()).clamp(0.0, 1.0));
+    fn counter_interaction(
+        &mut self,
+        ctx: &egui::Context,
+        response: &egui::Response,
+        rect: Rect,
+        painter: &egui::Painter,
+    ) {
+        let to_norm = |p: Pos2| {
+            Pos2::new(
+                ((p.x - rect.min.x) / rect.width()).clamp(0.0, 1.0),
+                ((p.y - rect.min.y) / rect.height()).clamp(0.0, 1.0),
+            )
+        };
         ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
         if response.drag_started() {
             self.counter_drag = response.interact_pointer_pos().map(to_norm);
@@ -1016,7 +1062,9 @@ fn graphs_size_picker(ui: &mut egui::Ui, size: &mut (usize, usize), info: Option
             changed |= ui.selectable_value(size, s, format!("{name} ({}x{})", s.0, s.1)).changed();
         }
         if let Some(i) = info {
-            changed |= ui.selectable_value(size, (i.width, i.height), format!("Same as video ({}x{})", i.width, i.height)).changed();
+            changed |= ui
+                .selectable_value(size, (i.width, i.height), format!("Same as video ({}x{})", i.width, i.height))
+                .changed();
         }
     });
     changed |= ui.add(egui::DragValue::new(&mut size.0).range(64..=7680)).changed();
@@ -1030,7 +1078,12 @@ fn parse_rects(text: &str) -> Option<Vec<[usize; 4]>> {
     text.split(';')
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .map(|part| part.split(',').map(|n| n.trim().parse().ok()).collect::<Option<Vec<usize>>>().and_then(|v| v.try_into().ok()))
+        .map(|part| {
+            part.split(',')
+                .map(|n| n.trim().parse().ok())
+                .collect::<Option<Vec<usize>>>()
+                .and_then(|v| v.try_into().ok())
+        })
         .collect()
 }
 
@@ -1045,8 +1098,17 @@ fn resolution_graph(ui: &mut egui::Ui, r: &ResolutionReport) {
     let to_y = |v: f64| rect.max.y - ((v - lo) / (full - lo)).clamp(0.0, 1.0) as f32 * rect.height();
     for frac in [0.5, 0.75, 1.0] {
         let y = to_y(full * frac);
-        painter.line_segment([Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)], Stroke::new(1.0, Color32::from_gray(55)));
-        painter.text(Pos2::new(rect.min.x + 2.0, y - 1.0), egui::Align2::LEFT_BOTTOM, format!("{:.0}", full * frac), egui::FontId::proportional(9.0), Color32::from_gray(140));
+        painter.line_segment(
+            [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
+            Stroke::new(1.0, Color32::from_gray(55)),
+        );
+        painter.text(
+            Pos2::new(rect.min.x + 2.0, y - 1.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("{:.0}", full * frac),
+            egui::FontId::proportional(9.0),
+            Color32::from_gray(140),
+        );
     }
     for s in &r.samples {
         let x = rect.min.x + (s.time / t_max) as f32 * rect.width();
@@ -1090,7 +1152,13 @@ fn background(painter: &egui::Painter, rect: Rect, target: PreviewTarget) {
             mesh.add_triangle(0, 1, 2);
             mesh.add_triangle(0, 2, 3);
             painter.add(mesh);
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "video", egui::FontId::proportional(28.0), Color32::from_white_alpha(25));
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "video",
+                egui::FontId::proportional(28.0),
+                Color32::from_white_alpha(25),
+            );
         }
     }
 }
@@ -1191,7 +1259,13 @@ fn demo_nits(seed: usize, rng: &mut Lcg, peak: f32, avg: f32) -> NitsFrame {
         for _ in 0..40 {
             // Pick a layer: sky, midtones or shadows.
             let r = rng.next();
-            let base = if r < 0.25 { 600.0 + 300.0 * (t * 6.0 + phase).sin() } else if r < 0.7 { 60.0 * (1.0 + (t * 11.0 + phase).sin()) + 20.0 } else { 3.0 + 4.0 * rng.next() };
+            let base = if r < 0.25 {
+                600.0 + 300.0 * (t * 6.0 + phase).sin()
+            } else if r < 0.7 {
+                60.0 * (1.0 + (t * 11.0 + phase).sin()) + 20.0
+            } else {
+                3.0 + 4.0 * rng.next()
+            };
             let tint = [1.0 + 0.3 * rng.gauss(), 1.0 + 0.2 * rng.gauss(), 0.9 + 0.4 * rng.gauss()];
             for c in 0..3 {
                 let nits = (base * tint[c] * (1.0 + 0.15 * rng.gauss())).max(0.0);
@@ -1201,7 +1275,10 @@ fn demo_nits(seed: usize, rng: &mut Lcg, peak: f32, avg: f32) -> NitsFrame {
             }
             hist[log_bin(base, HIST_BINS)] += 50;
             // Chromaticity scattered around D65, stretched toward green/yellow and blue.
-            let (x, y) = (0.3127 + 0.05 * rng.gauss() + 0.03 * (tint[0] - tint[2]), 0.329 + 0.05 * rng.gauss() + 0.02 * (tint[1] - 1.0));
+            let (x, y) = (
+                0.3127 + 0.05 * rng.gauss() + 0.03 * (tint[0] - tint[2]),
+                0.329 + 0.05 * rng.gauss() + 0.02 * (tint[1] - 1.0),
+            );
             let (bx, by) = ((x / 0.8 * XY_BINS as f64) as usize, (y / 0.9 * XY_BINS as f64) as usize);
             if bx < XY_BINS && by < XY_BINS {
                 cie[by * XY_BINS + bx] += 3;

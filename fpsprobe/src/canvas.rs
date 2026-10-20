@@ -38,14 +38,46 @@ const DECADES: [(f64, &str); 5] = [(1.0, "1"), (10.0, "10"), (100.0, "100"), (10
 
 /// CIE 1931 2° spectral locus (x, y), 380-700 nm.
 const LOCUS: [(f32, f32); 41] = [
-    (0.1741, 0.0050), (0.1733, 0.0048), (0.1714, 0.0051), (0.1644, 0.0109), (0.1566, 0.0177),
-    (0.1440, 0.0297), (0.1241, 0.0578), (0.1096, 0.0868), (0.0913, 0.1327), (0.0687, 0.2007),
-    (0.0454, 0.2950), (0.0235, 0.4127), (0.0082, 0.5384), (0.0039, 0.6548), (0.0139, 0.7502),
-    (0.0389, 0.8120), (0.0743, 0.8338), (0.1142, 0.8262), (0.1547, 0.8059), (0.1929, 0.7816),
-    (0.2296, 0.7543), (0.2658, 0.7243), (0.3016, 0.6923), (0.3373, 0.6589), (0.3731, 0.6245),
-    (0.4087, 0.5896), (0.4441, 0.5547), (0.4788, 0.5202), (0.5125, 0.4866), (0.5448, 0.4544),
-    (0.5752, 0.4242), (0.6029, 0.3965), (0.6270, 0.3725), (0.6482, 0.3514), (0.6658, 0.3340),
-    (0.6801, 0.3197), (0.6915, 0.3083), (0.7006, 0.2993), (0.7079, 0.2920), (0.7190, 0.2809),
+    (0.1741, 0.0050),
+    (0.1733, 0.0048),
+    (0.1714, 0.0051),
+    (0.1644, 0.0109),
+    (0.1566, 0.0177),
+    (0.1440, 0.0297),
+    (0.1241, 0.0578),
+    (0.1096, 0.0868),
+    (0.0913, 0.1327),
+    (0.0687, 0.2007),
+    (0.0454, 0.2950),
+    (0.0235, 0.4127),
+    (0.0082, 0.5384),
+    (0.0039, 0.6548),
+    (0.0139, 0.7502),
+    (0.0389, 0.8120),
+    (0.0743, 0.8338),
+    (0.1142, 0.8262),
+    (0.1547, 0.8059),
+    (0.1929, 0.7816),
+    (0.2296, 0.7543),
+    (0.2658, 0.7243),
+    (0.3016, 0.6923),
+    (0.3373, 0.6589),
+    (0.3731, 0.6245),
+    (0.4087, 0.5896),
+    (0.4441, 0.5547),
+    (0.4788, 0.5202),
+    (0.5125, 0.4866),
+    (0.5448, 0.4544),
+    (0.5752, 0.4242),
+    (0.6029, 0.3965),
+    (0.6270, 0.3725),
+    (0.6482, 0.3514),
+    (0.6658, 0.3340),
+    (0.6801, 0.3197),
+    (0.6915, 0.3083),
+    (0.7006, 0.2993),
+    (0.7079, 0.2920),
+    (0.7190, 0.2809),
     (0.7347, 0.2653),
 ];
 const GAMUTS: [(&str, [(f32, f32); 3], [u8; 4]); 3] = [
@@ -175,7 +207,12 @@ impl Canvas {
         if !self.building {
             self.text(title, r.x + pad, r.y + pad + 15.0 * s, 18.0 * s, [170, 170, 170]);
         }
-        Rect { x: r.x + pad + left_margin * s, y: r.y + pad + 24.0 * s, w: r.w - 2.0 * pad - left_margin * s, h: r.h - 2.0 * pad - 24.0 * s }
+        Rect {
+            x: r.x + pad + left_margin * s,
+            y: r.y + pad + 24.0 * s,
+            w: r.w - 2.0 * pad - left_margin * s,
+            h: r.h - 2.0 * pad - 24.0 * s,
+        }
     }
 
     fn fps_graph(&mut self, r: Rect, s: f32, w: &Widget, d: &FrameData) {
@@ -247,13 +284,15 @@ impl Canvas {
             // Density relative to an even spread over all rows; dense bins saturate.
             let norm = WAVE_ROWS as f32 / per_col.max(1.0);
             let len = (8.0 * 6.0 / norm).ceil() as usize + 1;
-            self.wave_lut = (per_col, (0..len).map(|c| ((1.0 - (-(c as f32) * norm / 6.0).exp()) * 255.0) as u8).collect());
+            self.wave_lut =
+                (per_col, (0..len).map(|c| ((1.0 - (-(c as f32) * norm / 6.0).exp()) * 255.0) as u8).collect());
         }
         let Some(px) = self.clip(plot) else { return };
         let lut = &self.wave_lut.1;
         let level = |count: u32| lut[(count as usize).min(lut.len() - 1)];
         // Bin column for each visible pixel column, accounting for clipping at the left edge.
-        let cols: Vec<usize> = (0..px.w).map(|i| ((i + px.skip_x) * WAVE_COLS / px.full_w).min(WAVE_COLS - 1)).collect();
+        let cols: Vec<usize> =
+            (0..px.w).map(|i| ((i + px.skip_x) * WAVE_COLS / px.full_w).min(WAVE_COLS - 1)).collect();
         let plane = WAVE_ROWS * WAVE_COLS;
         let pw = self.pixmap.width() as usize;
         let data = self.pixmap.data_mut();
@@ -302,7 +341,10 @@ impl Canvas {
                     continue;
                 }
                 let bar = v * row.h;
-                self.fill_solid(Rect { x: row.x + c as f32, y: row.y + row.h - bar, w: 1.0, h: bar }, [color[0], color[1], color[2], 210]);
+                self.fill_solid(
+                    Rect { x: row.x + c as f32, y: row.y + row.h - bar, w: 1.0, h: bar },
+                    [color[0], color[1], color[2], 210],
+                );
             }
         }
     }
@@ -332,7 +374,9 @@ impl Canvas {
         }
         let Some(bins) = d.nits.and_then(|n| n.scopes.as_ref()).and_then(|sc| sc.cie.as_deref()) else { return };
         let colors = std::mem::take(&mut self.cie_colors);
-        self.density(plot, bins, &colors, |bx, by| (bx as f32 / XY_BINS as f32, 1.0 - (by + 1) as f32 / XY_BINS as f32));
+        self.density(plot, bins, &colors, |bx, by| {
+            (bx as f32 / XY_BINS as f32, 1.0 - (by + 1) as f32 / XY_BINS as f32)
+        });
         self.cie_colors = colors;
     }
 
@@ -357,7 +401,9 @@ impl Canvas {
         let Some(bins) = d.nits.and_then(|n| n.scopes.as_ref()).and_then(|sc| sc.vec.as_deref()) else { return };
         let colors = std::mem::take(&mut self.vec_colors);
         // Bin (Cb, Cr): Cb to the right, Cr up.
-        self.density(plot, bins, &colors, |bx, by| (bx as f32 / XY_BINS as f32, 1.0 - (by + 1) as f32 / XY_BINS as f32));
+        self.density(plot, bins, &colors, |bx, by| {
+            (bx as f32 / XY_BINS as f32, 1.0 - (by + 1) as f32 / XY_BINS as f32)
+        });
         self.vec_colors = colors;
     }
 
@@ -380,7 +426,12 @@ impl Canvas {
                 let a = ((c as f32).ln_1p() / reference).min(1.0).max(0.15);
                 let (fx, fy) = place(bx, by);
                 let col = colors[by * XY_BINS + bx];
-                let rgba = [(col[0] as f32 * a) as u8, (col[1] as f32 * a) as u8, (col[2] as f32 * a) as u8, (a * 255.0) as u8];
+                let rgba = [
+                    (col[0] as f32 * a) as u8,
+                    (col[1] as f32 * a) as u8,
+                    (col[2] as f32 * a) as u8,
+                    (a * 255.0) as u8,
+                ];
                 self.fill_solid(Rect { x: plot.x + fx * plot.w, y: plot.y + fy * plot.h, w: cell, h: cell }, rgba);
             }
         }
@@ -389,7 +440,14 @@ impl Canvas {
     // ---- primitives ----------------------------------------------------------
 
     /// Plot background, horizontal guides and labels (left of the plot when `labels_left`).
-    fn plot_frame(&mut self, plot: Rect, s: f32, map: &dyn Fn(f64) -> f64, guides: &[(f64, String)], labels_left: bool) {
+    fn plot_frame(
+        &mut self,
+        plot: Rect,
+        s: f32,
+        map: &dyn Fn(f64) -> f64,
+        guides: &[(f64, String)],
+        labels_left: bool,
+    ) {
         self.fill(plot, [255, 255, 255, 18]);
         for (v, label) in guides {
             let y = plot.y + plot.h - map(*v) as f32 * plot.h;
@@ -406,7 +464,15 @@ impl Canvas {
     /// Drawn as one vertical span per pixel column (min..max of the samples landing
     /// there, joined to the previous column): far cheaper than stroking a 1000+
     /// point anti-aliased path every frame, and it looks the same.
-    fn series(&mut self, plot: Rect, s: f32, d: &FrameData, seconds: f32, lines: &[(&[f64], [u8; 3])], map: &dyn Fn(f64) -> f64) {
+    fn series(
+        &mut self,
+        plot: Rect,
+        s: f32,
+        d: &FrameData,
+        seconds: f32,
+        lines: &[(&[f64], [u8; 3])],
+        map: &dyn Fn(f64) -> f64,
+    ) {
         let span = (seconds.max(0.5) as f64 * d.capture_fps).round().max(2.0) as usize;
         let start = d.frame.saturating_sub(span);
         let thickness = (2.5 * s).max(1.0);
@@ -433,7 +499,10 @@ impl Canvas {
                     hi = hi.max(py);
                 } else {
                     if let Some(c) = col {
-                        self.fill_solid(Rect { x: c, y: lo - thickness / 2.0, w: step_cols, h: hi - lo + thickness }, rgba);
+                        self.fill_solid(
+                            Rect { x: c, y: lo - thickness / 2.0, w: step_cols, h: hi - lo + thickness },
+                            rgba,
+                        );
                     }
                     col = Some(px);
                     (lo, hi) = (py, py);
