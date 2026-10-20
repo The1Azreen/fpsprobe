@@ -25,12 +25,17 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
 
 ## Features
 
-- **Frame rate and frame time** for compressed captures, with a noise-adaptive duplicate threshold.
-- **GPU processing:** hardware video decode through FFmpeg (D3D11VA, CUDA, QSV or Vulkan) and frame comparison in a `wgpu` compute shader.
+- **Frame rate and frame time** for compressed captures, with a noise-adaptive duplicate threshold. Reports average FPS, the lowest one-second FPS and two common "1% low" figures.
+- **Capture-aware:**
+  - finds repeated frames caused by the capture device's clock (for example 60 vs 59.94 Hz) and counts them as game frames
+  - uses real frame timestamps for variable frame rate recordings
+  - flags still scenes, where a low frame rate says nothing about performance
+- **Comparisons:** draw a second capture's FPS and frame time on the same graphs, for example two consoles.
+- **GPU processing:** hardware video decode through FFmpeg (picked automatically: D3D11VA, CUDA, QSV, VAAPI, VideoToolbox or Vulkan) and frame comparison in a `wgpu` compute shader.
 - **HDR brightness:** HDR10 (PQ), HLG and SDR. Reports peak and average luminance in nits, plus MaxCLL and MaxFALL.
 - **HDR scopes:** RGB waveform in nits, L/R/G/B histogram, CIE 1931 chromaticity with Rec.709, P3 and Rec.2020 outlines, and a vectorscope.
 - **Exports:**
-  - CSV with per-frame data
+  - CSV with per-frame data, and a JSON summary
   - the video with the graphs on top (HDR sources stay HDR10)
   - the graphs alone as ProRes 4444 with transparency, for DaVinci Resolve and other editors
 - **GUI layout editor:** switch graphs on or off, then drag and resize them over a real frame of your video, chosen with a slider. Snap to a grid or align graphs to each other, nudge with the arrow keys, and lock graphs in place. Layouts save to JSON and can be reused from the command line.
@@ -136,16 +141,31 @@ fpsprobe.exe "capture.mp4" --nits --render "capture_analysis.mp4"
 
 # Graphs only, transparent ProRes 4444, using a layout saved from the GUI
 fpsprobe.exe "capture.mp4" --layout layout.json --graphs "graphs.mov" --graphs-size 1920x1080
+
+# Two consoles on the same graphs, plus a JSON summary of both
+fpsprobe.exe "ps5.mp4" --compare "xbox.mp4" --render "comparison.mp4" --summary-json "summary.json"
 ```
 
-Run `fpsprobe.exe --help` for all options, including `--ignore x,y,w,h`, which excludes HUD elements such as clocks or counters from frame comparison.
+Run `fpsprobe.exe --help` for all options. Useful ones:
+
+| Option | What it does |
+|---|---|
+| `--ignore x,y,w,h` | Excludes HUD elements such as clocks or counters from frame comparison (repeatable) |
+| `--summary-json FILE` | Writes the summary (FPS, 1% lows, capture drops, nits) as JSON |
+| `--compare FILE` | Draws a second capture's FPS and frame time beside this one's |
+| `--keep-capture-drops` | Leaves capture-clock repeats as dropped frames instead of counting them as game frames |
+| `--tears` | Experimental tear detection |
+| `--hwaccel` | Hardware decoder; `auto` (default) tries the ones your platform supports |
 
 ## Accuracy notes
 
 - **Frame times are limited by the capture rate.** At 60 Hz they are always multiples of 16.7 ms, so record at 120 Hz for finer detail.
 - **Nits come from the video signal, not from your display.** fpsprobe reports what the console sent; your TV may tone-map or clip it.
 - **MaxCLL uses the brightest single colour channel,** following its CTA-861.3 definition, so it is usually much higher than the peak luminance.
-- **Tearing isn't detected yet.**
+- **Capture-clock repeats:** a capture device running slightly faster than the console shows one frame twice at a fixed interval (about every 16.7 s for 60 vs 59.94 Hz). fpsprobe finds that pattern and counts those frames as game frames. A device running slow instead skips frames, which can't be seen in the video.
+- **Two 1% lows:** "p99" is the frame rate at the 99th-percentile frame time; "avg" averages the slowest 1% of frame times, as many benchmark tools do. The avg figure reacts to a few hitches that the p99 figure can miss.
+- **Still scenes:** when the picture barely changes, repeated frames may just be a still image. The summary reports that time separately, along with the lowest one-second FPS outside it.
+- **Tear detection is experimental.** It works on 64-pixel rows, so the tear line is approximate, and it ignores tears in the top and bottom fifth of the frame, where letterboxing and HUD strips look similar.
 
 fpsprobe is a free, open-source project and is not a certified measurement tool. Check its results before relying on them, especially in published comparisons.
 
