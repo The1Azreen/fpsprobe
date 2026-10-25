@@ -1,6 +1,6 @@
 //! GPU measurement of absolute luminance (nits) and HDR scopes for HDR10, HLG and SDR video.
 //!
-//! Frames arrive as 10-bit 4:2:0 (yuv420p10le) and are converted per pixel to
+//! Frames arrive as 10-bit 4:2:0 (P010) and are converted per pixel to
 //! linear RGB in nits on the GPU. Per frame we report:
 //! - peak / average of max(R,G,B): the quantities MaxCLL and MaxFALL are built from
 //! - the same peak ignoring the brightest 0.01% of pixels, and how many pixels sit at
@@ -296,7 +296,7 @@ impl NitsGpu {
             width: width as u32,
             height: height as u32,
             u_off: (width * height) as u32,
-            v_off: (width * height + width * height / 4) as u32,
+            v_off: (width * height + 1) as u32,
             wave_cols: WAVE_COLS as u32,
             wave_rows: WAVE_ROWS as u32,
             scope_flags,

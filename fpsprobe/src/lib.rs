@@ -7,6 +7,7 @@
 pub mod analyze;
 pub mod cadence;
 pub mod canvas;
+pub mod composite;
 pub mod export;
 mod gpu;
 pub mod layout;

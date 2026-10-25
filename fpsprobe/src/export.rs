@@ -489,7 +489,7 @@ fn measure_nits(
 ) -> Result<Vec<NitsFrame>> {
     let (w, h) = (info.width / 4 * 4, info.height / 2 * 2);
     let mut gpu = NitsGpu::new(w, h, info.color, job.sdr_white, 0)?;
-    let (rx, mut child) = video::spawn_decoder(&job.input, hwaccel, (w, h), "yuv420p10le", gpu.frame_bytes())?;
+    let (rx, mut child) = video::spawn_decoder(&job.input, hwaccel, (w, h), "p010le", gpu.frame_bytes())?;
     progress.stage("Measuring nits", max_frames);
     let mut out = Vec::new();
     for frame in rx.into_iter().take(max_frames) {

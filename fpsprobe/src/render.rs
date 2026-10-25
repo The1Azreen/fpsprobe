@@ -2,11 +2,14 @@
 //! - the source video with the graphs composited on top (HDR stays HDR), and/or
 //! - the graphs alone on a transparent canvas as ProRes 4444, for video editors.
 //!
-//! Each frame's overlay is drawn on the CPU by [`Canvas`] and piped to FFmpeg.
-//! When the layout needs nits/scopes, the video is decoded a second time on a
-//! worker thread and measured on the GPU in step with rendering.
+//! The video is decoded once, on a worker thread, as 10-bit 4:2:0 (P010, what the
+//! hardware decoders and encoders use natively, so FFmpeg converts nothing). Each frame is
+//! measured on the GPU when the layout needs nits or scopes, its overlay is drawn
+//! on the CPU by [`Canvas`] and blended in on the GPU ([`Compositor`]), and FFmpeg
+//! only encodes the result (copying the audio from the source).
 
 use crate::canvas::{Canvas, FrameData};
+use crate::composite::Compositor;
 use crate::layout::Layout;
 use crate::nits::{NitsFrame, NitsGpu, Transfer};
 use crate::progress::Progress;
@@ -16,11 +19,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Stdio};
-use std::sync::mpsc;
+use std::process::{Child, Stdio};
+use std::sync::{Arc, mpsc};
+use std::thread::JoinHandle;
 
 /// Nits that panel white maps to in HDR output (BT.2408 graphics white).
 const HDR_GRAPHICS_WHITE: f32 = 203.0;
+/// Frames queued between drawing, compositing and FFmpeg's stdin.
+const WRITE_QUEUE: usize = 4;
 
 #[derive(Clone, Debug)]
 pub enum Output {
@@ -54,6 +60,12 @@ pub struct Compare<'a> {
 impl RenderJob<'_> {
     fn frames(&self) -> usize {
         self.fps.len()
+    }
+
+    /// Size frames are decoded at: 4:2:0 packing on the GPU needs a multiple of 4x2,
+    /// so odd sizes are padded with black (and cropped again when encoding).
+    fn decode_size(&self) -> (usize, usize) {
+        (self.info.width.div_ceil(4) * 4, self.info.height.div_ceil(2) * 2)
     }
 }
 
@@ -105,9 +117,9 @@ fn encoder_args(encoder: &str) -> Vec<&'static str> {
     }
 }
 
-/// Maps 8-bit SDR overlay values to code values of the HDR output transfer, so
-/// overlay white lands at graphics white instead of the format's peak.
-fn hdr_panel_lut(transfer: Transfer) -> [u8; 256] {
+/// Maps 8-bit SDR overlay values to code values of the output transfer, so overlay
+/// white lands at graphics white instead of an HDR format's peak (identity for SDR).
+fn panel_lut(transfer: Transfer) -> [u8; 256] {
     let mut lut = [0u8; 256];
     for (v, out) in lut.iter_mut().enumerate() {
         let linear = (v as f32 / 255.0).powf(2.2);
@@ -130,16 +142,25 @@ fn hdr_panel_lut(transfer: Transfer) -> [u8; 256] {
     lut
 }
 
-/// How overlay pixels are converted before being piped to FFmpeg.
-enum PixelTransform {
-    /// Premultiplied RGBA as drawn (FFmpeg overlay is told alpha=premultiplied).
-    None,
-    /// Premultiplied RGBA with colour channels re-encoded for an HDR output.
-    Hdr(Box<[u8; 256]>),
-    /// Straight (un-premultiplied) alpha, which editors expect from ProRes 4444.
-    Straight,
+/// Straight (un-premultiplied) RGBA, which editors expect from ProRes 4444.
+fn straight_alpha(premultiplied: &[u8]) -> Vec<u8> {
+    let mut out = premultiplied.to_vec();
+    for px in out.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        if a > 0 && a < 255 {
+            for c in &mut px[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    out
 }
 
+/// An overlay drawn on the main thread, with the source frame it goes on (video only).
+type Overlay = (Option<Arc<Vec<u8>>>, Vec<u8>);
+
+/// An FFmpeg process and the threads feeding it. Drawing, GPU compositing and
+/// writing to FFmpeg each run on their own thread, so they overlap.
 struct Sink {
     /// What this FFmpeg writes, for error reports.
     label: String,
@@ -148,169 +169,211 @@ struct Sink {
     canvas: Canvas,
     child: Child,
     /// FFmpeg's last messages, for the error report.
-    stderr: Option<std::thread::JoinHandle<String>>,
-    stdin: Option<ChildStdin>,
-    transform: PixelTransform,
-    buf: Vec<u8>,
+    stderr: Option<JoinHandle<String>>,
+    overlays: Option<mpsc::SyncSender<Overlay>>,
+    workers: Vec<JoinHandle<Result<()>>>,
 }
 
 impl Sink {
-    fn write_frame(&mut self) -> std::io::Result<()> {
-        let data = self.canvas.pixels();
-        let out: &[u8] = match &self.transform {
-            PixelTransform::None => data,
-            PixelTransform::Hdr(lut) => {
-                self.buf.clear();
-                self.buf.extend_from_slice(data);
-                for px in self.buf.as_chunks_mut::<4>().0 {
-                    px[0] = lut[px[0] as usize];
-                    px[1] = lut[px[1] as usize];
-                    px[2] = lut[px[2] as usize];
+    /// Starts FFmpeg. With a compositor, overlays are blended into their source
+    /// frames; without, they are written as straight-alpha RGBA.
+    fn spawn(
+        mut cmd: std::process::Command,
+        label: String,
+        canvas: Canvas,
+        compositor: Option<Compositor>,
+    ) -> Result<Self> {
+        let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
+        let mut stdin = child.stdin.take().unwrap();
+        let stderr = video::capture_stderr(&mut child);
+        let (overlays, overlay_rx) = mpsc::sync_channel::<Overlay>(WRITE_QUEUE);
+        let (frames, frame_rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
+        // Stops quietly when FFmpeg stops reading; its exit status tells why.
+        let writer = std::thread::spawn(move || {
+            for f in frame_rx {
+                if stdin.write_all(&f).is_err() {
+                    break;
                 }
-                &self.buf
             }
-            PixelTransform::Straight => {
-                self.buf.clear();
-                self.buf.extend_from_slice(data);
-                for px in self.buf.as_chunks_mut::<4>().0 {
-                    let a = px[3] as u32;
-                    if a > 0 && a < 255 {
-                        for c in &mut px[..3] {
-                            *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
-                        }
+            Ok(())
+        });
+        let converter = std::thread::spawn(move || -> Result<()> {
+            let mut compositor = compositor;
+            for (source, overlay) in overlay_rx {
+                let out = match (&mut compositor, source) {
+                    (Some(c), Some(frame)) => match c.push(&frame, &overlay)? {
+                        Some(out) => out,
+                        None => continue,
+                    },
+                    (Some(_), None) => bail!("no decoded frame to draw the graphs on"),
+                    (None, _) => straight_alpha(&overlay),
+                };
+                if frames.send(out).is_err() {
+                    return Ok(());
+                }
+            }
+            // Frames still on the GPU.
+            if let Some(c) = &mut compositor {
+                for out in c.flush()? {
+                    if frames.send(out).is_err() {
+                        break;
                     }
                 }
-                &self.buf
             }
-        };
-        self.stdin.as_mut().expect("stdin open while rendering").write_all(out)
+            Ok(())
+        });
+        Ok(Self {
+            label,
+            hw_encoder: None,
+            canvas,
+            child,
+            stderr,
+            overlays: Some(overlays),
+            workers: vec![converter, writer],
+        })
+    }
+
+    /// Queues the overlay just drawn; false once the output has stopped taking frames.
+    fn send(&mut self, source: Option<&Arc<Vec<u8>>>) -> bool {
+        let overlay = self.canvas.pixels().to_vec();
+        self.overlays.as_ref().is_some_and(|tx| tx.send((source.cloned(), overlay)).is_ok())
+    }
+
+    /// Closes FFmpeg's input and waits for it and the feeding threads.
+    fn finish(&mut self, kill: bool) -> Result<(std::process::ExitStatus, Option<anyhow::Error>)> {
+        drop(self.overlays.take());
+        if kill {
+            let _ = self.child.kill();
+        }
+        let mut error = None;
+        for w in self.workers.drain(..) {
+            match w.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => error = error.or(Some(e)),
+                Err(_) => error = error.or(Some(anyhow!("render thread panicked"))),
+            }
+        }
+        Ok((self.child.wait()?, error))
     }
 }
 
-fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<Sink> {
+fn video_sink(job: &RenderJob, path: &Path, encoder: Option<&str>, frames_out: usize) -> Result<Sink> {
     let info = job.info;
-    let (bx, by, bw, bh) =
-        job.layout.bounds_px(info.width as f32, info.height as f32).context("no graphs are enabled")?;
-    let canvas = Canvas::new(info.width, info.height, (bx, by, bw, bh))?;
+    let rect = job.layout.bounds_px(info.width as f32, info.height as f32).context("no graphs are enabled")?;
+    let canvas = Canvas::new(info.width, info.height, rect)?;
     let hdr = info.color.is_hdr();
     let encoder = encoder.map(str::to_string).unwrap_or_else(|| pick_encoder(hdr));
+    let (dw, dh) = job.decode_size();
+    let compositor = Compositor::new(dw, dh, rect, info.color, &panel_lut(info.color.transfer))?;
+
+    let trc = match info.color.transfer {
+        Transfer::Pq => "smpte2084",
+        Transfer::Hlg => "arib-std-b67",
+        Transfer::Sdr => "bt709",
+    };
+    let (primaries, matrix) = if info.color.bt2020 { ("bt2020", "bt2020nc") } else { ("bt709", "bt709") };
+    let range = if info.color.full_range { "pc" } else { "tv" };
+    let tags = ["-color_primaries", primaries, "-color_trc", trc, "-colorspace", matrix, "-color_range", range];
 
     let mut cmd = video::command("ffmpeg");
-    cmd.args(["-v", "error", "-stats", "-y"]);
-    if let Some(hw) = job.hwaccel {
-        cmd.args(["-hwaccel", hw]);
-    }
+    cmd.args(["-v", "error", "-stats", "-y", "-f", "rawvideo", "-pix_fmt", "p010le", "-s"])
+        .arg(format!("{dw}x{dh}"))
+        .args(["-framerate", &info.fps.to_string()]);
+    // Tagging the raw input too keeps FFmpeg from converting every frame's colours
+    // in software (5x slower, and a needless conversion).
+    cmd.args(tags).args(["-i", "-"]);
     cmd.arg("-i").arg(job.input);
-    cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s"]).arg(format!("{bw}x{bh}")).args([
-        "-framerate",
-        &info.fps.to_string(),
-        "-i",
-        "-",
-    ]);
-    // Both streams start at t=0 so overlay frame N lands on video frame N. With a
-    // variable frame rate the overlay runs at the nominal rate and each video frame
-    // takes the overlay frame nearest its timestamp, hence the half-frame shift.
-    let (ov_fmt, out_fmt) = if hdr { ("yuv420p10", "yuv420p10le") } else { ("auto", "yuv420p") };
-    let shift = if job.timeline.is_variable() { format!("-{}/TB", 0.5 / info.fps) } else { String::new() };
-    cmd.arg("-filter_complex").arg(format!(
-        "[0:v]setpts=PTS-STARTPTS[v0];[1:v]setpts=PTS-STARTPTS{shift}[ov];\
-         [v0][ov]overlay={bx}:{by}:alpha=premultiplied:eof_action=pass:format={ov_fmt},format={out_fmt}[v]"
-    ));
-    cmd.args(["-map", "[v]", "-map", "0:a?", "-c:a", "aac", "-b:a", "256k"]);
-    cmd.args(["-frames:v", &job.frames().to_string(), "-c:v", &encoder]);
+    cmd.args(["-map", "0:v", "-map", "1:a?", "-c:a", "aac", "-b:a", "256k"]);
+    // Encoders need even sizes; padding added for decoding is cropped off again.
+    let (ow, oh) = (info.width / 2 * 2, info.height / 2 * 2);
+    if (ow, oh) != (dw, dh) {
+        cmd.args(["-vf", &format!("crop={ow}:{oh}:0:0")]);
+    }
+    cmd.args(["-frames:v", &frames_out.to_string(), "-c:v", &encoder]);
     cmd.args(encoder_args(&encoder));
-    if hdr {
-        let trc = if info.color.transfer == Transfer::Hlg { "arib-std-b67" } else { "smpte2084" };
-        cmd.args(["-color_primaries", "bt2020", "-color_trc", trc, "-colorspace", "bt2020nc"]);
-        if encoder.starts_with("hevc_") || encoder == "libx265" {
-            cmd.args(["-profile:v", "main10"]);
-        }
+    // Hardware encoders take P010 / NV12 as is; x264 / x265 want planar formats.
+    let out_fmt = match (encoder.starts_with("lib"), hdr) {
+        (false, true) => "p010le",
+        (false, false) => "nv12",
+        (true, true) => "yuv420p10le",
+        (true, false) => "yuv420p",
+    };
+    cmd.args(["-pix_fmt", out_fmt]);
+    cmd.args(tags);
+    if hdr && (encoder.starts_with("hevc_") || encoder == "libx265") {
+        cmd.args(["-profile:v", "main10"]);
     }
     cmd.arg(path);
-    let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
-    let stdin = child.stdin.take();
-    let stderr = video::capture_stderr(&mut child);
-    let transform =
-        if hdr { PixelTransform::Hdr(Box::new(hdr_panel_lut(info.color.transfer))) } else { PixelTransform::None };
     let label = format!("video with graphs ({encoder}) to {}", path.display());
-    let hw_encoder = (!encoder.starts_with("lib")).then_some(encoder);
-    Ok(Sink { label, hw_encoder, canvas, child, stderr, stdin, transform, buf: Vec::new() })
+    let mut sink = Sink::spawn(cmd, label, canvas, Some(compositor))?;
+    sink.hw_encoder = (!encoder.starts_with("lib")).then_some(encoder);
+    Ok(sink)
 }
 
-fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Result<Sink> {
+fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize, frames_out: usize) -> Result<Sink> {
     let canvas = Canvas::full(width, height)?;
     let mut cmd = video::command("ffmpeg");
     cmd.args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s"])
         .arg(format!("{width}x{height}"))
         .args(["-framerate", &job.info.fps.to_string(), "-i", "-"]);
-    cmd.args(["-frames:v", &job.timeline.slots(job.frames()).last().map_or(0, |s| s + 1).to_string()]);
+    cmd.args(["-frames:v", &frames_out.to_string()]);
     cmd.args(["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"]);
     cmd.args(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]);
     cmd.arg(path);
-    let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
-    let stdin = child.stdin.take();
-    let stderr = video::capture_stderr(&mut child);
-    let label = format!("graphs only (prores_ks) to {}", path.display());
-    Ok(Sink {
-        label,
-        hw_encoder: None,
-        canvas,
-        child,
-        stderr,
-        stdin,
-        transform: PixelTransform::Straight,
-        buf: Vec::new(),
-    })
+    Sink::spawn(cmd, format!("graphs only (prores_ks) to {}", path.display()), canvas, None)
 }
 
-/// Decodes the video a second time and measures nits frame by frame.
-struct NitsStream {
-    gpu: NitsGpu,
-    rx: mpsc::Receiver<Vec<u8>>,
-    child: Child,
-    ready: VecDeque<NitsFrame>,
-    done: bool,
+/// One decoded source frame: its measurement and/or its pixels.
+pub struct SourceFrame {
+    pub nits: Option<NitsFrame>,
+    /// P010 at [`RenderJob::decode_size`], when outputs need the picture.
+    pub yuv: Option<Vec<u8>>,
 }
 
-impl NitsStream {
-    fn next(&mut self) -> Result<Option<NitsFrame>> {
-        while self.ready.is_empty() && !self.done {
-            match self.rx.recv() {
-                Ok(buf) => self.ready.extend(self.gpu.push(&buf)?),
-                Err(_) => {
-                    self.ready.extend(self.gpu.finish()?);
-                    self.done = true;
-                }
-            }
-        }
-        Ok(self.ready.pop_front())
-    }
-}
-
-/// Starts nits measurement on a worker thread; frames arrive in order on the receiver.
-pub fn spawn_nits_worker(
+/// Decodes the video once on a worker thread, measuring nits on the GPU when
+/// `scope_flags` is given and keeping the pixels when `keep_pixels` is set.
+/// Frames arrive in order on the receiver.
+pub fn spawn_source(
     input: &Path,
     info: &VideoInfo,
+    (width, height): (usize, usize),
     hwaccel: Option<&str>,
     sdr_white: f32,
-    scope_flags: u32,
-) -> Result<(mpsc::Receiver<NitsFrame>, std::thread::JoinHandle<Result<()>>)> {
-    let (nw, nh) = (info.width / 4 * 4, info.height / 2 * 2);
-    let gpu = NitsGpu::new(nw, nh, info.color, sdr_white, scope_flags)?;
-    let (rx, child) = video::spawn_decoder(input, hwaccel, (nw, nh), "yuv420p10le", gpu.frame_bytes())?;
-    let mut stream = NitsStream { gpu, rx, child, ready: VecDeque::new(), done: false };
-    let (tx, frames) = mpsc::sync_channel::<NitsFrame>(16);
+    scope_flags: Option<u32>,
+    keep_pixels: bool,
+) -> Result<(mpsc::Receiver<SourceFrame>, JoinHandle<Result<()>>)> {
+    let mut gpu = scope_flags.map(|f| NitsGpu::new(width, height, info.color, sdr_white, f)).transpose()?;
+    let (rx, mut child) = video::spawn_decoder(input, hwaccel, (width, height), "p010le", width * height * 3)?;
+    let (tx, frames) = mpsc::sync_channel::<SourceFrame>(4);
     let handle = std::thread::spawn(move || -> Result<()> {
         let result = (|| {
-            while let Some(f) = stream.next()? {
-                if tx.send(f).is_err() {
-                    break; // consumer finished or failed
+            // Nits come back in batches, so pixels wait here for their measurement.
+            let mut pending: VecDeque<Option<Vec<u8>>> = VecDeque::new();
+            let emit = |nits: Vec<NitsFrame>, pending: &mut VecDeque<Option<Vec<u8>>>| {
+                nits.into_iter()
+                    .all(|n| tx.send(SourceFrame { nits: Some(n), yuv: pending.pop_front().flatten() }).is_ok())
+            };
+            for buf in rx {
+                let open = match gpu.as_mut() {
+                    Some(g) => {
+                        let done = g.push(&buf)?;
+                        pending.push_back(keep_pixels.then_some(buf));
+                        emit(done, &mut pending)
+                    }
+                    None => tx.send(SourceFrame { nits: None, yuv: Some(buf) }).is_ok(),
+                };
+                if !open {
+                    return Ok(()); // consumer finished or failed
                 }
+            }
+            if let Some(g) = gpu.as_mut() {
+                let done = g.finish()?;
+                emit(done, &mut pending);
             }
             Ok(())
         })();
-        let _ = stream.child.kill();
-        let _ = stream.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
         result
     });
     Ok((frames, handle))
@@ -341,73 +404,83 @@ fn describe_exit(status: std::process::ExitStatus) -> String {
 pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFrame>>> {
     let info = job.info;
     let wants_nits = job.layout.needs_nits();
-
-    let mut sinks = Vec::new();
-    for out in job.outputs {
-        sinks.push(match out {
-            Output::Overlay { path, encoder } => overlay_sink(job, path, encoder.as_deref())?,
-            Output::GraphsOnly { path, width, height } => graphs_sink(job, path, *width, *height)?,
-        });
-    }
-    // Nits run on their own thread (decode + GPU) so they overlap with drawing and encoding.
-    let worker = if wants_nits {
-        Some(spawn_nits_worker(job.input, info, job.hwaccel, job.sdr_white, job.layout.scope_flags())?)
-    } else {
-        None
-    };
-
     // Outputs run at the nominal rate; with a variable frame rate a source frame can
     // cover several output frames (or none), so frames are drawn per output slot.
     let slots = job.timeline.slots(job.frames());
     let total_slots = slots.last().map_or(0, |s| s + 1);
+
+    let mut sinks = Vec::new();
+    for out in job.outputs {
+        sinks.push(match out {
+            Output::Overlay { path, encoder } => video_sink(job, path, encoder.as_deref(), total_slots)?,
+            Output::GraphsOnly { path, width, height } => graphs_sink(job, path, *width, *height, total_slots)?,
+        });
+    }
+    let keep_pixels = job.outputs.iter().any(|o| matches!(o, Output::Overlay { .. }));
+    // Decoding and nits run on their own thread so they overlap with drawing and encoding.
+    let source = if wants_nits || keep_pixels {
+        let flags = wants_nits.then(|| job.layout.scope_flags());
+        Some(spawn_source(job.input, info, job.decode_size(), job.hwaccel, job.sdr_white, flags, keep_pixels)?)
+    } else {
+        None
+    };
+
     progress.stage("Rendering", total_slots);
     let mut measured: Vec<NitsFrame> = Vec::new();
     let (mut peak_hist, mut avg_hist) = (Vec::new(), Vec::new());
     let mut max_cll = 0f32;
     let mut failed = false;
     let mut current: Option<NitsFrame> = None;
+    let mut pixels: Option<Arc<Vec<u8>>> = None;
     let mut next = 0usize;
-    for slot in 0..total_slots {
-        if progress.is_cancelled() {
-            break;
-        }
-        while next < slots.len() && slots[next] <= slot {
-            let nf = worker.as_ref().and_then(|(frames, _)| frames.recv().ok());
-            if let Some(f) = &nf {
-                max_cll = max_cll.max(f.peak);
+    let result: Result<()> = {
+        for slot in 0..total_slots {
+            if progress.is_cancelled() {
+                break;
             }
-            peak_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.peak_lum as f64));
-            avg_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.avg_lum as f64));
-            if let Some(mut f) = std::mem::replace(&mut current, nf) {
-                f.scopes = None;
-                measured.push(f);
+            while next < slots.len() && slots[next] <= slot {
+                let src = source.as_ref().and_then(|(frames, _)| frames.recv().ok());
+                let (nf, yuv) = src.map_or((None, None), |s| (s.nits, s.yuv));
+                if let Some(f) = &nf {
+                    max_cll = max_cll.max(f.peak);
+                }
+                peak_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.peak_lum as f64));
+                avg_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.avg_lum as f64));
+                if let Some(mut f) = std::mem::replace(&mut current, nf) {
+                    f.scopes = None;
+                    measured.push(f);
+                }
+                if let Some(yuv) = yuv {
+                    pixels = Some(Arc::new(yuv));
+                }
+                next += 1;
             }
-            next += 1;
-        }
-        let data = FrameData {
-            frame: next - 1,
-            capture_fps: info.fps,
-            fps: job.fps,
-            frametime_ms: job.frametime_ms,
-            compare_fps: job.compare.map(|c| c.fps),
-            compare_frametime_ms: job.compare.map(|c| c.frametime_ms),
-            nits: current.as_ref(),
-            peak_history: &peak_hist,
-            avg_history: &avg_hist,
-            max_cll,
-            source_pixels: (info.width * info.height) as f32,
-        };
-        for sink in &mut sinks {
-            sink.canvas.draw(job.layout, &data);
-            if sink.write_frame().is_err() {
-                failed = true; // FFmpeg exited; its own error is printed on stderr
+            let data = FrameData {
+                frame: next - 1,
+                capture_fps: info.fps,
+                fps: job.fps,
+                frametime_ms: job.frametime_ms,
+                compare_fps: job.compare.map(|c| c.fps),
+                compare_frametime_ms: job.compare.map(|c| c.frametime_ms),
+                nits: current.as_ref(),
+                peak_history: &peak_hist,
+                avg_history: &avg_hist,
+                max_cll,
+                source_pixels: (info.width * info.height) as f32,
+            };
+            for sink in &mut sinks {
+                sink.canvas.draw(job.layout, &data);
+                if !sink.send(pixels.as_ref()) {
+                    failed = true; // FFmpeg exited; its error is reported below
+                }
             }
+            if failed {
+                break;
+            }
+            progress.advance();
         }
-        if failed {
-            break;
-        }
-        progress.advance();
-    }
+        Ok(())
+    };
     if let Some(mut f) = current.take() {
         f.scopes = None;
         measured.push(f);
@@ -416,16 +489,14 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
     let mut ffmpeg_errors = Vec::new();
     let mut crashed_encoder = None;
     for sink in &mut sinks {
-        drop(sink.stdin.take());
-        if progress.is_cancelled() {
-            let _ = sink.child.kill();
-        }
-        let status = sink.child.wait()?;
+        let (status, worker_error) = sink.finish(progress.is_cancelled() || result.is_err())?;
         let messages = sink.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default();
         if status.code().is_some_and(|c| c as u32 >= 0xC000_0000) && sink.hw_encoder.is_some() {
             crashed_encoder = sink.hw_encoder.clone();
         }
-        if !status.success() || failed {
+        if let Some(e) = worker_error.filter(|_| !progress.is_cancelled() && result.is_ok()) {
+            ffmpeg_errors.push(format!("{}: {e:#}", sink.label));
+        } else if (!status.success() || failed) && !progress.is_cancelled() && result.is_ok() {
             let mut report = format!("{}: {}", sink.label, describe_exit(status));
             if !messages.is_empty() {
                 report += &format!("\n{messages}");
@@ -433,10 +504,11 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
             ffmpeg_errors.push(report);
         }
     }
-    if let Some((frames, handle)) = worker {
+    if let Some((frames, handle)) = source {
         drop(frames); // unblocks the worker if it is still sending
-        handle.join().map_err(|_| anyhow!("nits worker panicked"))??;
+        handle.join().map_err(|_| anyhow!("decoding worker panicked"))??;
     }
+    result?;
     if progress.is_cancelled() {
         bail!("cancelled");
     }

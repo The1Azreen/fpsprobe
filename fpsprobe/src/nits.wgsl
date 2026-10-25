@@ -3,8 +3,9 @@
 // Always, per frame, a fine log-nits histogram of max(R,G,B) goes to `cll`: it
 // gives a MaxCLL that ignores a few stray pixels, and counts pixels at the ceiling.
 //
-// The frame is uploaded as packed u16 planes (Y, then U, then V), two samples per
-// u32 word. Each thread handles one 2x2 pixel block (one chroma sample), so a
+// The frame is uploaded as P010 (the decoder's and encoders' native layout): a
+// Y plane, then interleaved U/V, each 10-bit value in the top bits of a u16, two
+// u16 per u32 word. Each thread handles one 2x2 pixel block (one chroma sample), so a
 // 16x16 workgroup covers 32x32 pixels. Per workgroup we write peak/sum of
 // max(R,G,B) nits (what MaxCLL/MaxFALL use) and of luminance. Optionally, per
 // frame, we accumulate scopes into `scopes` at offsets given in Params:
@@ -24,8 +25,8 @@ const CLL_BINS: u32 = 1024u;
 struct Params {
     width: u32,
     height: u32,
-    u_off: u32,          // index (in u16 samples) of the U plane
-    v_off: u32,          // index of the V plane
+    u_off: u32,          // index (in u16 samples) of the first U sample
+    v_off: u32,          // index of the first V sample (U and V alternate)
     wave_cols: u32,
     wave_rows: u32,
     scope_flags: u32,
@@ -65,9 +66,10 @@ var<workgroup> s_sum_y: array<f32, 256>;
 var<workgroup> s_hist: array<atomic<u32>, 1024>;
 var<workgroup> s_cll: array<atomic<u32>, 1024>;
 
+/// 10-bit value of u16 sample `i` (P010 keeps it in the top bits).
 fn sample(i: u32) -> f32 {
     let w = frame[i >> 1u];
-    return f32((w >> ((i & 1u) * 16u)) & 0xffffu);
+    return f32(((w >> ((i & 1u) * 16u)) & 0xffffu) >> 6u);
 }
 
 /// Bilinearly interpolated, normalized chroma (Cb, Cr) for luma pixel (x, y).
@@ -90,8 +92,8 @@ fn chroma(x: u32, y: u32) -> vec2<f32> {
     let i10 = y0 * cw + x1;
     let i01 = y1 * cw + x0;
     let i11 = y1 * cw + x1;
-    let u = mix(mix(sample(p.u_off + i00), sample(p.u_off + i10), fx), mix(sample(p.u_off + i01), sample(p.u_off + i11), fx), fy);
-    let v = mix(mix(sample(p.v_off + i00), sample(p.v_off + i10), fx), mix(sample(p.v_off + i01), sample(p.v_off + i11), fx), fy);
+    let u = mix(mix(sample(p.u_off + 2u * i00), sample(p.u_off + 2u * i10), fx), mix(sample(p.u_off + 2u * i01), sample(p.u_off + 2u * i11), fx), fy);
+    let v = mix(mix(sample(p.v_off + 2u * i00), sample(p.v_off + 2u * i10), fx), mix(sample(p.v_off + 2u * i01), sample(p.v_off + 2u * i11), fx), fy);
     let scale = select(896.0, 1023.0, p.full_range == 1u);
     return vec2<f32>((u - 512.0) / scale, (v - 512.0) / scale);
 }
