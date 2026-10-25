@@ -22,6 +22,8 @@ use std::thread::JoinHandle;
 const PREVIEW_MAX_W: usize = 1280;
 const GRAPH_SIZES: [(&str, (usize, usize)); 4] =
     [("4K", (3840, 2160)), ("1440p", (2560, 1440)), ("1080p", (1920, 1080)), ("720p", (1280, 720))];
+/// Encoders for the video with graphs; "auto" picks a hardware one and falls back to software if it crashes.
+const ENCODERS: [&str; 6] = ["auto", "hevc_amf", "hevc_nvenc", "hevc_qsv", "libx265", "libx264"];
 const HWACCELS: [&str; 8] = ["auto", "d3d11va", "cuda", "qsv", "vulkan", "vaapi", "videotoolbox", "none"];
 
 fn main() -> eframe::Result {
@@ -66,6 +68,8 @@ struct Settings {
     export_summary: bool,
     /// Second capture drawn beside this one on the FPS and frame-time graphs.
     compare: Option<PathBuf>,
+    /// Encoder for the video with graphs (see ENCODERS).
+    encoder: String,
 }
 
 impl Default for Settings {
@@ -94,6 +98,7 @@ impl Default for Settings {
             detect_tears: false,
             export_summary: false,
             compare: None,
+            encoder: "auto".into(),
         }
     }
 }
@@ -271,6 +276,7 @@ impl App {
             fix_capture_drops: s.fix_capture_drops,
             tears: s.show_experimental && s.detect_tears,
             compare: s.compare.clone(),
+            encoder: (s.encoder != "auto").then(|| s.encoder.clone()),
             nits_in_csv: s.csv_nits,
             hwaccel: (s.hwaccel != "none").then(|| s.hwaccel.clone()),
             threshold: (!s.auto_threshold).then_some(s.threshold),
@@ -669,6 +675,21 @@ impl App {
             ui.add_enabled(s.export_csv, egui::Checkbox::new(&mut s.csv_nits, "include nits columns"))
         });
         ui.checkbox(&mut s.export_video, "Video with graphs (.mp4, HDR kept)");
+        ui.indent("encoder", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Encoder");
+                egui::ComboBox::from_id_salt("encoder").selected_text(&s.encoder).show_ui(ui, |ui| {
+                    for e in ENCODERS {
+                        ui.selectable_value(&mut s.encoder, e.to_string(), e);
+                    }
+                });
+            })
+            .response
+            .on_hover_text(
+                "auto: the GPU's encoder (AMD AMF, NVIDIA NVENC or Intel QSV), rendering again in software \
+                 if it crashes. libx265 / libx264 are slower but don't depend on the GPU driver.",
+            );
+        });
         ui.checkbox(&mut s.export_graphs, "Graphs only (ProRes 4444 + alpha .mov)");
         ui.checkbox(&mut s.export_summary, "Summary (.json)");
         ui.horizontal(|ui| {

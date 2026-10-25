@@ -71,9 +71,29 @@ fn pick_encoder(hdr: bool) -> String {
             .status()
             .is_ok_and(|s| s.success())
     };
-    let fallback = if hdr { "libx265" } else { "libx264" };
-    ["hevc_nvenc", "hevc_amf", "hevc_qsv"].into_iter().find(|e| works(e)).unwrap_or(fallback).to_string()
+    ["hevc_nvenc", "hevc_amf", "hevc_qsv"].into_iter().find(|e| works(e)).unwrap_or(software_encoder(hdr)).to_string()
 }
+
+/// CPU encoder for when no hardware encoder works (x265 keeps HDR in 10-bit).
+pub fn software_encoder(hdr: bool) -> &'static str {
+    if hdr { "libx265" } else { "libx264" }
+}
+
+/// A hardware encoder crashed while rendering. That is usually the driver, so
+/// rendering again with [`software_encoder`] tends to work.
+#[derive(Debug)]
+pub struct EncoderCrashed {
+    pub encoder: String,
+    details: String,
+}
+
+impl std::fmt::Display for EncoderCrashed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "ffmpeg failed while rendering:\n{}", self.details)
+    }
+}
+
+impl std::error::Error for EncoderCrashed {}
 
 fn encoder_args(encoder: &str) -> Vec<&'static str> {
     match encoder {
@@ -123,6 +143,8 @@ enum PixelTransform {
 struct Sink {
     /// What this FFmpeg writes, for error reports.
     label: String,
+    /// The hardware encoder this FFmpeg uses, if any.
+    hw_encoder: Option<String>,
     canvas: Canvas,
     child: Child,
     /// FFmpeg's last messages, for the error report.
@@ -211,7 +233,8 @@ fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<S
     let transform =
         if hdr { PixelTransform::Hdr(Box::new(hdr_panel_lut(info.color.transfer))) } else { PixelTransform::None };
     let label = format!("video with graphs ({encoder}) to {}", path.display());
-    Ok(Sink { label, canvas, child, stderr, stdin, transform, buf: Vec::new() })
+    let hw_encoder = (!encoder.starts_with("lib")).then_some(encoder);
+    Ok(Sink { label, hw_encoder, canvas, child, stderr, stdin, transform, buf: Vec::new() })
 }
 
 fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Result<Sink> {
@@ -228,7 +251,16 @@ fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Res
     let stdin = child.stdin.take();
     let stderr = video::capture_stderr(&mut child);
     let label = format!("graphs only (prores_ks) to {}", path.display());
-    Ok(Sink { label, canvas, child, stderr, stdin, transform: PixelTransform::Straight, buf: Vec::new() })
+    Ok(Sink {
+        label,
+        hw_encoder: None,
+        canvas,
+        child,
+        stderr,
+        stdin,
+        transform: PixelTransform::Straight,
+        buf: Vec::new(),
+    })
 }
 
 /// Decodes the video a second time and measures nits frame by frame.
@@ -382,6 +414,7 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
     }
 
     let mut ffmpeg_errors = Vec::new();
+    let mut crashed_encoder = None;
     for sink in &mut sinks {
         drop(sink.stdin.take());
         if progress.is_cancelled() {
@@ -389,6 +422,9 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
         }
         let status = sink.child.wait()?;
         let messages = sink.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default();
+        if status.code().is_some_and(|c| c as u32 >= 0xC000_0000) && sink.hw_encoder.is_some() {
+            crashed_encoder = sink.hw_encoder.clone();
+        }
         if !status.success() || failed {
             let mut report = format!("{}: {}", sink.label, describe_exit(status));
             if !messages.is_empty() {
@@ -405,7 +441,11 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
         bail!("cancelled");
     }
     if !ffmpeg_errors.is_empty() {
-        bail!("ffmpeg failed while rendering:\n{}", ffmpeg_errors.join("\n"));
+        let details = ffmpeg_errors.join("\n");
+        if let Some(encoder) = crashed_encoder {
+            return Err(EncoderCrashed { encoder, details }.into());
+        }
+        bail!("ffmpeg failed while rendering:\n{details}");
     }
     Ok(wants_nits.then_some(measured))
 }

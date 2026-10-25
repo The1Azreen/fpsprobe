@@ -6,7 +6,7 @@ use crate::cadence::{self, CaptureDrops};
 use crate::layout::Layout;
 use crate::nits::{self, NitsFrame, NitsGpu};
 use crate::progress::Progress;
-use crate::render::{self, Compare, Output, RenderJob};
+use crate::render::{self, Compare, EncoderCrashed, Output, RenderJob};
 use crate::timing::{self, PacingStats, Timeline};
 use crate::video::{self, VideoInfo};
 use anyhow::{Context, Result, bail};
@@ -30,6 +30,8 @@ pub struct ExportJob {
     pub nits_in_csv: bool,
     /// FFmpeg hardware decoder, "auto" to pick one, or None for software decoding.
     pub hwaccel: Option<String>,
+    /// Encoder for the video with graphs; None picks a hardware encoder and falls
+    /// back to software if it crashes.
     pub encoder: Option<String>,
     pub use_gpu: bool,
     pub pixel_difference: u32,
@@ -345,6 +347,7 @@ pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
         outputs.push(Output::GraphsOnly { path: path.clone(), width: *width, height: *height });
     }
     let mut render_seconds = None;
+    let mut encoder_note = None;
     let nits_frames = if !outputs.is_empty() {
         let start = Instant::now();
         let (fps, frametime_ms) = pacing.timeline.fps_series(&pacing.is_new);
@@ -360,7 +363,27 @@ pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
             hwaccel: hwaccel.as_deref(),
             sdr_white: job.sdr_white,
         };
-        let n = render::render(&rj, progress)?;
+        let n = match render::render(&rj, progress) {
+            // Hardware encoders crash now and then (driver trouble, GPU contention).
+            // With the encoder on automatic, render once more in software.
+            Err(e) if job.encoder.is_none() && e.downcast_ref::<EncoderCrashed>().is_some() => {
+                let crashed = &e.downcast_ref::<EncoderCrashed>().unwrap().encoder;
+                let software = render::software_encoder(info.color.is_hdr());
+                encoder_note =
+                    Some(format!("{crashed} crashed while rendering; rendered again with {software} (software)\n"));
+                let outputs: Vec<Output> = outputs
+                    .iter()
+                    .map(|o| match o {
+                        Output::Overlay { path, .. } => {
+                            Output::Overlay { path: path.clone(), encoder: Some(software.to_string()) }
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                render::render(&RenderJob { outputs: &outputs, ..rj }, progress)?
+            }
+            r => r?,
+        };
         render_seconds = Some(start.elapsed().as_secs_f64());
         match n {
             Some(n) => Some(n),
@@ -393,6 +416,9 @@ pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
     }
 
     let mut summary = stats.text();
+    if let Some(note) = encoder_note {
+        summary += &note;
+    }
     if let Some(s) = render_seconds {
         summary += &format!("rendered in {s:.1}s\n");
     }
