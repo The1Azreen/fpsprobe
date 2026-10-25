@@ -243,8 +243,7 @@ fn analyse(input: &Path, job: &ExportJob, hwaccel: Option<&str>, progress: &Prog
     let info = video::probe(input)?;
     let start = Instant::now();
     // Timestamps need their own demux pass; running it beside decoding hides its cost.
-    let ts_input = input.to_path_buf();
-    let timestamps = std::thread::spawn(move || video::frame_times(&ts_input));
+    let timestamps = video::FrameTimes::spawn(input)?;
     let diff_opts = DiffOptions {
         hwaccel,
         use_gpu: job.use_gpu,
@@ -254,7 +253,7 @@ fn analyse(input: &Path, job: &ExportJob, hwaccel: Option<&str>, progress: &Prog
     };
     let (scores, frames) = analyze::run_diff(input, &info, &diff_opts, progress)?;
     // Without timestamps the frame rate is taken as constant, as before.
-    let timestamps = timestamps.join().ok().and_then(Result::ok).flatten();
+    let timestamps = timestamps.finish().ok().flatten();
     let timeline = Timeline::from_timestamps(info.fps, timestamps, frames);
     let analysis = analyze::analyze(&scores, job.threshold);
     let capture = cadence::capture_drops(&analysis.is_new, &timeline);

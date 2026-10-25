@@ -120,3 +120,39 @@ fn torn_frames_are_detected() {
     let s = run(&clip, |j| j.tears = true);
     assert_eq!(s.torn_frames, Some(20));
 }
+
+#[test]
+fn render_after_cancelled_render() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let clip = encode("cancel", (0..1200).map(image), None);
+    let dir = std::env::temp_dir().join(format!("fpsprobe-test-cancel-{}", std::process::id()));
+    let (first, second) = (dir.join("first"), dir.join("second"));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let job = |out: &PathBuf| ExportJob {
+        use_gpu: false,
+        hwaccel: None,
+        video: Some(out.join("out.mp4")),
+        ..ExportJob::new(clip.clone())
+    };
+
+    // Cancel once rendering is under way, as the GUI's Cancel button does.
+    let progress = std::sync::Arc::new(Progress::default());
+    let p = progress.clone();
+    let first_job = job(&first);
+    let handle = std::thread::spawn(move || export::run(&first_job, &p));
+    while !(progress.snapshot().0 == "Rendering" && progress.snapshot().1 > 100) && !handle.is_finished() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    progress.cancel();
+    let err = handle.join().unwrap().err().expect("first export cancelled");
+    assert!(format!("{err:#}").contains("cancelled"), "{err:#}");
+
+    // Then export again somewhere else.
+    let report = export::run(&job(&second), &Progress::default());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&clip);
+    report.expect("export after a cancelled one");
+}

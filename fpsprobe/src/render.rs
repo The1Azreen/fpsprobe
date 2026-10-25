@@ -123,6 +123,8 @@ enum PixelTransform {
 struct Sink {
     canvas: Canvas,
     child: Child,
+    /// FFmpeg's last messages, for the error report.
+    stderr: Option<std::thread::JoinHandle<String>>,
     stdin: Option<ChildStdin>,
     transform: PixelTransform,
     buf: Vec<u8>,
@@ -201,11 +203,12 @@ fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<S
         }
     }
     cmd.arg(path);
-    let mut child = cmd.stdin(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
+    let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
     let stdin = child.stdin.take();
+    let stderr = video::capture_stderr(&mut child);
     let transform =
         if hdr { PixelTransform::Hdr(Box::new(hdr_panel_lut(info.color.transfer))) } else { PixelTransform::None };
-    Ok(Sink { canvas, child, stdin, transform, buf: Vec::new() })
+    Ok(Sink { canvas, child, stderr, stdin, transform, buf: Vec::new() })
 }
 
 fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Result<Sink> {
@@ -218,9 +221,10 @@ fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Res
     cmd.args(["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vendor", "apl0"]);
     cmd.args(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]);
     cmd.arg(path);
-    let mut child = cmd.stdin(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
+    let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
     let stdin = child.stdin.take();
-    Ok(Sink { canvas, child, stdin, transform: PixelTransform::Straight, buf: Vec::new() })
+    let stderr = video::capture_stderr(&mut child);
+    Ok(Sink { canvas, child, stderr, stdin, transform: PixelTransform::Straight, buf: Vec::new() })
 }
 
 /// Decodes the video a second time and measures nits frame by frame.
@@ -353,13 +357,17 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
         measured.push(f);
     }
 
-    let mut ffmpeg_ok = true;
+    let mut ffmpeg_errors = Vec::new();
     for sink in &mut sinks {
         drop(sink.stdin.take());
         if progress.is_cancelled() {
             let _ = sink.child.kill();
         }
-        ffmpeg_ok &= sink.child.wait()?.success();
+        let ok = sink.child.wait()?.success();
+        let messages = sink.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default();
+        if !ok || failed {
+            ffmpeg_errors.push(if messages.is_empty() { "no error message".to_string() } else { messages });
+        }
     }
     if let Some((frames, handle)) = worker {
         drop(frames); // unblocks the worker if it is still sending
@@ -368,8 +376,8 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
     if progress.is_cancelled() {
         bail!("cancelled");
     }
-    if failed || !ffmpeg_ok {
-        bail!("ffmpeg failed while rendering");
+    if !ffmpeg_errors.is_empty() {
+        bail!("ffmpeg failed while rendering:\n{}", ffmpeg_errors.join("\n"));
     }
     Ok(wants_nits.then_some(measured))
 }

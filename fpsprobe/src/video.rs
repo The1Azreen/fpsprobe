@@ -2,10 +2,12 @@
 
 use crate::nits::ColorInfo;
 use anyhow::{Context, Result, bail};
-use std::io::Read;
+use std::collections::VecDeque;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
+use std::thread::JoinHandle;
 
 #[derive(Clone, Debug)]
 pub struct VideoInfo {
@@ -57,18 +59,54 @@ pub fn probe(path: &Path) -> Result<VideoInfo> {
     })
 }
 
-/// Presentation time of every video frame in seconds from the first one, read from
-/// packet timestamps (demuxing only, no decoding). `None` when any timestamp is missing.
-pub fn frame_times(path: &Path) -> Result<Option<Vec<f64>>> {
-    let out = command("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0"])
-        .arg(path)
-        .output()
-        .context("failed to run ffprobe (is FFmpeg installed and on PATH?)")?;
-    if !out.status.success() {
-        bail!("ffprobe failed: {}", String::from_utf8_lossy(&out.stderr));
+/// Reads the presentation time of every video frame from packet timestamps
+/// (demuxing only, no decoding) in the background. Dropping it stops ffprobe.
+pub struct FrameTimes {
+    child: Child,
+    reader: Option<JoinHandle<std::io::Result<String>>>,
+}
+
+impl FrameTimes {
+    pub fn spawn(path: &Path) -> Result<Self> {
+        let mut child = command("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0"])
+            .arg(path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("failed to run ffprobe (is FFmpeg installed and on PATH?)")?;
+        let mut stdout = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            stdout.read_to_string(&mut text).map(|_| text)
+        });
+        Ok(Self { child, reader: Some(reader) })
     }
-    let text = String::from_utf8(out.stdout)?;
+
+    /// Seconds from the first frame, in presentation order. `None` when any
+    /// timestamp is missing.
+    pub fn finish(mut self) -> Result<Option<Vec<f64>>> {
+        let text = self.reader.take().unwrap().join().map_err(|_| anyhow::anyhow!("ffprobe reader panicked"))??;
+        if !self.child.wait()?.success() {
+            bail!("ffprobe failed to read frame timestamps");
+        }
+        parse_frame_times(&text)
+    }
+}
+
+impl Drop for FrameTimes {
+    fn drop(&mut self) {
+        // Still running when analysis was cancelled; ffprobe would read the whole file.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub fn frame_times(path: &Path) -> Result<Option<Vec<f64>>> {
+    FrameTimes::spawn(path)?.finish()
+}
+
+fn parse_frame_times(text: &str) -> Result<Option<Vec<f64>>> {
     let parsed: Option<Vec<f64>> =
         text.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| l.trim_end_matches(',').parse().ok()).collect();
     let Some(mut times) = parsed.filter(|t| !t.is_empty()) else { return Ok(None) };
@@ -107,6 +145,40 @@ fn hw_decodes(input: &Path, hw: &str) -> bool {
         .stdout(Stdio::null())
         .output()
         .is_ok_and(|o| o.status.success() && o.stderr.is_empty())
+}
+
+/// Forwards a child's stderr to ours (FFmpeg's progress line included) and keeps its
+/// last few messages for error reports: the GUI has no console to show them on.
+pub fn capture_stderr(child: &mut Child) -> Option<JoinHandle<String>> {
+    let mut stderr = child.stderr.take()?;
+    Some(std::thread::spawn(move || {
+        const KEEP: usize = 8;
+        let (mut tail, mut line) = (VecDeque::new(), Vec::new());
+        let mut buf = [0u8; 4096];
+        let mut out = std::io::stderr();
+        while let Ok(n) = stderr.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            let _ = out.write_all(&buf[..n]);
+            for &b in &buf[..n] {
+                if b != b'\n' && b != b'\r' {
+                    line.push(b);
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&line).trim().to_string();
+                line.clear();
+                // Progress lines ("frame= ... speed=") aren't errors.
+                if !text.is_empty() && !text.starts_with("frame=") {
+                    tail.push_back(text);
+                    if tail.len() > KEEP {
+                        tail.pop_front();
+                    }
+                }
+            }
+        }
+        tail.into_iter().collect::<Vec<_>>().join("\n")
+    }))
 }
 
 /// Builds a command for an FFmpeg tool without flashing a console window from the GUI.
