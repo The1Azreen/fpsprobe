@@ -121,6 +121,8 @@ enum PixelTransform {
 }
 
 struct Sink {
+    /// What this FFmpeg writes, for error reports.
+    label: String,
     canvas: Canvas,
     child: Child,
     /// FFmpeg's last messages, for the error report.
@@ -208,7 +210,8 @@ fn overlay_sink(job: &RenderJob, path: &Path, encoder: Option<&str>) -> Result<S
     let stderr = video::capture_stderr(&mut child);
     let transform =
         if hdr { PixelTransform::Hdr(Box::new(hdr_panel_lut(info.color.transfer))) } else { PixelTransform::None };
-    Ok(Sink { canvas, child, stderr, stdin, transform, buf: Vec::new() })
+    let label = format!("video with graphs ({encoder}) to {}", path.display());
+    Ok(Sink { label, canvas, child, stderr, stdin, transform, buf: Vec::new() })
 }
 
 fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Result<Sink> {
@@ -224,7 +227,8 @@ fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize) -> Res
     let mut child = cmd.stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().context("failed to run ffmpeg")?;
     let stdin = child.stdin.take();
     let stderr = video::capture_stderr(&mut child);
-    Ok(Sink { canvas, child, stderr, stdin, transform: PixelTransform::Straight, buf: Vec::new() })
+    let label = format!("graphs only (prores_ks) to {}", path.display());
+    Ok(Sink { label, canvas, child, stderr, stdin, transform: PixelTransform::Straight, buf: Vec::new() })
 }
 
 /// Decodes the video a second time and measures nits frame by frame.
@@ -278,6 +282,26 @@ pub fn spawn_nits_worker(
         result
     });
     Ok((frames, handle))
+}
+
+/// FFmpeg's exit status in words. Windows reports crashes as NTSTATUS codes
+/// (0xC...), which FFmpeg never returns itself.
+fn describe_exit(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(0) => "exited early".into(),
+        Some(code) if (code as u32) >= 0xC000_0000 => {
+            let what = match code as u32 {
+                0xC000_0005 => "access violation",
+                0xC000_0409 => "stack buffer overrun",
+                0xC000_001D => "illegal instruction",
+                0xC000_0017 | 0xC000_012D => "out of memory",
+                _ => "crash",
+            };
+            format!("crashed with 0x{:08X} ({what}), probably in the encoder or GPU driver", code as u32)
+        }
+        Some(code) => format!("exited with code {code}"),
+        None => "was terminated".into(),
+    }
 }
 
 /// Renders all requested outputs in one pass. Returns per-frame nits (without
@@ -363,10 +387,14 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
         if progress.is_cancelled() {
             let _ = sink.child.kill();
         }
-        let ok = sink.child.wait()?.success();
+        let status = sink.child.wait()?;
         let messages = sink.stderr.take().and_then(|h| h.join().ok()).unwrap_or_default();
-        if !ok || failed {
-            ffmpeg_errors.push(if messages.is_empty() { "no error message".to_string() } else { messages });
+        if !status.success() || failed {
+            let mut report = format!("{}: {}", sink.label, describe_exit(status));
+            if !messages.is_empty() {
+                report += &format!("\n{messages}");
+            }
+            ffmpeg_errors.push(report);
         }
     }
     if let Some((frames, handle)) = worker {
