@@ -1,5 +1,8 @@
 // Absolute luminance (nits) measurement and HDR scopes for 10-bit 4:2:0 frames.
 //
+// Always, per frame, a fine log-nits histogram of max(R,G,B) goes to `cll`: it
+// gives a MaxCLL that ignores a few stray pixels, and counts pixels at the ceiling.
+//
 // The frame is uploaded as packed u16 planes (Y, then U, then V), two samples per
 // u32 word. Each thread handles one 2x2 pixel block (one chroma sample), so a
 // 16x16 workgroup covers 32x32 pixels. Per workgroup we write peak/sum of
@@ -16,6 +19,7 @@ const SCOPE_CIE: u32 = 4u;
 const SCOPE_VEC: u32 = 8u;
 const HIST_BINS: u32 = 256u;
 const XY_BINS: u32 = 256u;
+const CLL_BINS: u32 = 1024u;
 
 struct Params {
     width: u32,
@@ -33,7 +37,7 @@ struct Params {
     transfer: u32,       // 0 = PQ (ST 2084), 1 = SDR gamma 2.4, 2 = HLG
     full_range: u32,
     bt2020: u32,         // primaries for the CIE scope: 1 = BT.2020, 0 = BT.709
-    _pad0: u32,
+    cll_base: u32,       // offset into cll for this frame (in u32s)
     sdr_white: f32,
     // YCbCr -> R'G'B' coefficients
     cr_r: f32,
@@ -50,6 +54,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read> frame: array<u32>;
 @group(0) @binding(2) var<storage, read_write> wg_stats: array<f32>;
 @group(0) @binding(3) var<storage, read_write> scopes: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> cll: array<atomic<u32>>;
 
 var<workgroup> s_max_rgb: array<f32, 256>;
 var<workgroup> s_sum_rgb: array<f32, 256>;
@@ -58,6 +63,7 @@ var<workgroup> s_sum_y: array<f32, 256>;
 // Histogram is pre-aggregated per workgroup: only 4 x 256 bins, so global
 // atomics would contend heavily.
 var<workgroup> s_hist: array<atomic<u32>, 1024>;
+var<workgroup> s_cll: array<atomic<u32>, 1024>;
 
 fn sample(i: u32) -> f32 {
     let w = frame[i >> 1u];
@@ -170,8 +176,9 @@ fn main(
     let do_hist = (p.scope_flags & SCOPE_HIST) != 0u;
     let do_cie = (p.scope_flags & SCOPE_CIE) != 0u;
     let do_vec = (p.scope_flags & SCOPE_VEC) != 0u;
-    if (do_hist) {
-        for (var i = 0u; i < 4u; i = i + 1u) {
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        atomicStore(&s_cll[li * 4u + i], 0u);
+        if (do_hist) {
             atomicStore(&s_hist[li * 4u + i], 0u);
         }
     }
@@ -199,6 +206,7 @@ fn main(
             let n = to_nits(rgb_p);
             let m = max(n.r, max(n.g, n.b));
             let lum = p.kr * n.r + p.kg * n.g + p.kb * n.b;
+            atomicAdd(&s_cll[log_bin(m, CLL_BINS)], 1u);
             max_rgb = max(max_rgb, m);
             sum_rgb = sum_rgb + m;
             max_y = max(max_y, lum);
@@ -251,6 +259,13 @@ fn main(
         wg_stats[o + 1u] = s_sum_rgb[0];
         wg_stats[o + 2u] = s_max_y[0];
         wg_stats[o + 3u] = s_sum_y[0];
+    }
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let bin = li * 4u + i;
+        let v = atomicLoad(&s_cll[bin]);
+        if (v > 0u) {
+            atomicAdd(&cll[p.cll_base + bin], v);
+        }
     }
     if (do_hist) {
         for (var i = 0u; i < 4u; i = i + 1u) {

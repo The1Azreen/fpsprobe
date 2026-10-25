@@ -3,6 +3,8 @@
 //! Frames arrive as 10-bit 4:2:0 (yuv420p10le) and are converted per pixel to
 //! linear RGB in nits on the GPU. Per frame we report:
 //! - peak / average of max(R,G,B): the quantities MaxCLL and MaxFALL are built from
+//! - the same peak ignoring the brightest 0.01% of pixels, and how many pixels sit at
+//!   the top of the signal range (stray compression or chroma overshoot vs real highlights)
 //! - peak / average luminance (Y)
 //! - optionally scope data: RGB waveform, L/R/G/B histogram, CIE xy, vectorscope.
 
@@ -15,6 +17,12 @@ pub const HIST_BINS: usize = 256;
 /// Bins per axis of the CIE xy (x 0..0.8, y 0..0.9) and vectorscope (Cb/Cr -0.5..0.5) plots.
 pub const XY_BINS: usize = 256;
 const BATCH: usize = 8;
+/// Bins of the per-frame max(R,G,B) histogram (log nits, about 0.9% per bin).
+const CLL_BINS: usize = 1024;
+/// Share of each frame's pixels the robust peak may ignore.
+const CLL_IGNORE: f64 = 0.0001;
+/// Pixels at or above this many nits count as being at the signal ceiling.
+pub const CEILING_NITS: f32 = 9500.0;
 
 pub const SCOPE_WAVE: u32 = 1;
 pub const SCOPE_HIST: u32 = 2;
@@ -81,6 +89,10 @@ pub struct ScopeData {
 pub struct NitsFrame {
     /// Brightest max(R,G,B) in the frame (the per-frame MaxCLL candidate).
     pub peak: f32,
+    /// Brightest max(R,G,B) after ignoring the brightest 0.01% of pixels.
+    pub robust_peak: f32,
+    /// Pixels whose max(R,G,B) is at the top of the signal range (CEILING_NITS+).
+    pub ceiling_pixels: u32,
     /// Frame average of max(R,G,B) (the per-frame MaxFALL candidate).
     pub avg: f32,
     pub peak_lum: f32,
@@ -134,7 +146,7 @@ struct Params {
     transfer: u32,
     full_range: u32,
     bt2020: u32,
-    _pad0: u32,
+    cll_base: u32,
     sdr_white: f32,
     cr_r: f32,
     cb_g: f32,
@@ -157,6 +169,8 @@ pub struct NitsGpu {
     scopes: wgpu::Buffer,
     wg_readback: wgpu::Buffer,
     scope_readback: wgpu::Buffer,
+    cll: wgpu::Buffer,
+    cll_readback: wgpu::Buffer,
     base: Params,
     groups: (u32, u32),
     wg_count: usize,
@@ -220,6 +234,7 @@ impl NitsGpu {
                 buffer_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
                 buffer_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer_entry(4, wgpu::BufferBindingType::Storage { read_only: false }),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -251,6 +266,9 @@ impl NitsGpu {
         let scopes = buf("nits-scopes", scope_bytes, U::STORAGE | U::COPY_SRC | U::COPY_DST);
         let wg_readback = buf("nits-wg-rb", wg_bytes, U::MAP_READ | U::COPY_DST);
         let scope_readback = buf("nits-scopes-rb", scope_bytes, U::MAP_READ | U::COPY_DST);
+        let cll_bytes = (CLL_BINS * BATCH * 4) as u64;
+        let cll = buf("nits-cll", cll_bytes, U::STORAGE | U::COPY_SRC | U::COPY_DST);
+        let cll_readback = buf("nits-cll-rb", cll_bytes, U::MAP_READ | U::COPY_DST);
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -267,6 +285,7 @@ impl NitsGpu {
                 wgpu::BindGroupEntry { binding: 1, resource: frame.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: wg_stats.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: scopes.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: cll.as_entire_binding() },
             ],
         });
 
@@ -293,7 +312,7 @@ impl NitsGpu {
             },
             full_range: color.full_range as u32,
             bt2020: color.bt2020 as u32,
-            _pad0: 0,
+            cll_base: 0,
             sdr_white,
             cr_r: 2.0 * (1.0 - kr),
             cb_g: 2.0 * kb * (1.0 - kb) / kg,
@@ -316,6 +335,8 @@ impl NitsGpu {
             scopes,
             wg_readback,
             scope_readback,
+            cll,
+            cll_readback,
             base,
             groups,
             wg_count,
@@ -333,8 +354,12 @@ impl NitsGpu {
     pub fn push(&mut self, frame: &[u8]) -> Result<Vec<NitsFrame>> {
         let slot = self.pending;
         let words = self.layout.words;
-        let params =
-            Params { wg_base: (slot * self.wg_count * 4) as u32, scope_base: (slot * words) as u32, ..self.base };
+        let params = Params {
+            wg_base: (slot * self.wg_count * 4) as u32,
+            scope_base: (slot * words) as u32,
+            cll_base: (slot * CLL_BINS) as u32,
+            ..self.base
+        };
         let params_offset = slot as u64 * self.params_stride;
         self.queue.write_buffer(&self.params, params_offset, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.frame, 0, frame);
@@ -343,6 +368,7 @@ impl NitsGpu {
         if words > 0 {
             enc.clear_buffer(&self.scopes, (slot * words * 4) as u64, Some((words * 4) as u64));
         }
+        enc.clear_buffer(&self.cll, (slot * CLL_BINS * 4) as u64, Some((CLL_BINS * 4) as u64));
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.pipeline);
@@ -382,13 +408,20 @@ impl NitsGpu {
         if words > 0 {
             copy.copy_buffer_to_buffer(&self.scopes, 0, &self.scope_readback, 0, scope_bytes);
         }
+        let cll_bytes = (n * CLL_BINS * 4) as u64;
+        copy.copy_buffer_to_buffer(&self.cll, 0, &self.cll_readback, 0, cll_bytes);
         bufs.push(copy.finish());
         self.queue.submit(bufs);
 
         let wg_slice = self.wg_readback.slice(0..wg_bytes);
         let scope_slice = self.scope_readback.slice(0..if words > 0 { scope_bytes } else { 4 });
+        let cll_slice = self.cll_readback.slice(0..cll_bytes);
         let (tx, rx) = std::sync::mpsc::channel();
         let tx2 = tx.clone();
+        let tx3 = tx.clone();
+        cll_slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx3.send(r);
+        });
         wg_slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
@@ -410,6 +443,8 @@ impl NitsGpu {
         {
             let wg_view = wg_slice.get_mapped_range().map_err(|e| anyhow!("readback view failed: {e:?}"))?;
             let wg: &[f32] = bytemuck::cast_slice(&wg_view);
+            let cll_view = cll_slice.get_mapped_range().map_err(|e| anyhow!("readback view failed: {e:?}"))?;
+            let cll: &[u32] = bytemuck::cast_slice(&cll_view);
             let scope_view = if words > 0 {
                 Some(scope_slice.get_mapped_range().map_err(|e| anyhow!("readback view failed: {e:?}"))?)
             } else {
@@ -428,6 +463,9 @@ impl NitsGpu {
                     sum_lum += g[3] as f64;
                 }
                 f.avg = (sum / self.pixels as f64) as f32;
+                let hist = &cll[slot * CLL_BINS..(slot + 1) * CLL_BINS];
+                f.robust_peak = robust_peak(hist, self.pixels);
+                f.ceiling_pixels = hist[ceiling_bin()..].iter().sum();
                 f.avg_lum = (sum_lum / self.pixels as f64) as f32;
                 f.scopes = scope_words.map(|w| {
                     let s = &w[slot * words..(slot + 1) * words];
@@ -443,6 +481,7 @@ impl NitsGpu {
             }
         }
         self.wg_readback.unmap();
+        self.cll_readback.unmap();
         if words > 0 {
             self.scope_readback.unmap();
         }
@@ -451,9 +490,58 @@ impl NitsGpu {
     }
 }
 
+/// Nits at the centre of max(R,G,B) histogram bin `b` (inverse of the shader's log_bin).
+fn bin_nits(b: usize) -> f32 {
+    10001f32.powf(b as f32 / (CLL_BINS - 1) as f32) - 1.0
+}
+
+/// First histogram bin at or above CEILING_NITS.
+fn ceiling_bin() -> usize {
+    (((CEILING_NITS + 1.0).log2() / 10001f32.log2()) * (CLL_BINS - 1) as f32).ceil() as usize
+}
+
+/// Brightest bin once the brightest CLL_IGNORE share of pixels is set aside.
+fn robust_peak(hist: &[u32], pixels: usize) -> f32 {
+    let allowed = (pixels as f64 * CLL_IGNORE) as u64;
+    let mut above = 0u64;
+    for b in (0..hist.len()).rev() {
+        above += hist[b] as u64;
+        if above > allowed {
+            return bin_nits(b);
+        }
+    }
+    0.0
+}
+
 /// Peak and average over a clip, in the sense of CTA-861.3 MaxCLL / MaxFALL.
 pub fn content_light_levels(frames: &[NitsFrame]) -> (f32, f32) {
     let max_cll = frames.iter().map(|f| f.peak).fold(0.0, f32::max);
     let max_fall = frames.iter().map(|f| f.avg).fold(0.0, f32::max);
     (max_cll, max_fall)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn robust_peak_ignores_stray_pixels() {
+        let pixels = 2560 * 1440;
+        let mut hist = vec![0u32; CLL_BINS];
+        hist[700] = pixels as u32 - 300; // the picture, around 500 nits
+        hist[CLL_BINS - 1] = 300; // 300 stray pixels at the 10,000-nit ceiling
+        assert!((bin_nits(700) - robust_peak(&hist, pixels)).abs() < 1e-3);
+        // Highlights covering more than 0.01% of the frame are real and count.
+        hist[CLL_BINS - 1] = 2000;
+        assert_eq!(robust_peak(&hist, pixels), bin_nits(CLL_BINS - 1));
+        assert_eq!(hist[ceiling_bin()..].iter().sum::<u32>(), 2000);
+    }
+
+    #[test]
+    fn bins_cover_the_pq_range() {
+        assert!(bin_nits(0).abs() < 1e-3);
+        assert!((bin_nits(CLL_BINS - 1) - 10000.0).abs() < 1.0);
+        assert!(bin_nits(ceiling_bin()) >= CEILING_NITS);
+        assert!(bin_nits(ceiling_bin() - 1) < CEILING_NITS * 1.01);
+    }
 }

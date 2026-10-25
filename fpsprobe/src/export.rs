@@ -120,8 +120,15 @@ pub struct NitsSummary {
     pub peak_luminance: f32,
     pub median_frame_peak_luminance: f32,
     pub avg_luminance: f64,
+    /// Strict MaxCLL: the brightest max(R,G,B) of any pixel.
     pub max_cll: f32,
+    /// MaxCLL with the brightest 0.01% of each frame's pixels ignored.
+    pub max_cll_robust: f32,
     pub max_fall: f32,
+    /// Frames with pixels at the top of the signal range (9,500+ nits).
+    pub ceiling_frames: usize,
+    /// Most such pixels in one frame.
+    pub max_ceiling_pixels: u32,
 }
 
 impl RunSummary {
@@ -175,6 +182,16 @@ impl RunSummary {
             );
             out += &format!("avg luminance    {:>10.0} nits  (whole clip)\n", n.avg_luminance);
             out += &format!("MaxCLL           {:>10.0} nits  (HDR metadata: brightest max(R,G,B) pixel)\n", n.max_cll);
+            out += &format!(
+                "MaxCLL 99.99%    {:>10.0} nits  (ignoring the brightest 0.01% of each frame's pixels)\n",
+                n.max_cll_robust
+            );
+            if n.ceiling_frames > 0 {
+                out += &format!(
+                    "signal ceiling   {:>10} frames with pixels at 9,500+ nits, at most {} pixels in one frame\n",
+                    n.ceiling_frames, n.max_ceiling_pixels
+                );
+            }
             out += &format!("MaxFALL          {:>10.0} nits  (HDR metadata: brightest frame average)\n", n.max_fall);
         }
         if let Some(b) = &self.compare {
@@ -363,7 +380,10 @@ pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
             median_frame_peak_luminance: pct(0.5),
             avg_luminance: n.iter().map(|f| f.avg_lum as f64).sum::<f64>() / n.len() as f64,
             max_cll,
+            max_cll_robust: n.iter().map(|f| f.robust_peak).fold(0.0, f32::max),
             max_fall,
+            ceiling_frames: n.iter().filter(|f| f.ceiling_pixels > 0).count(),
+            max_ceiling_pixels: n.iter().map(|f| f.ceiling_pixels).max().unwrap_or(0),
         });
     }
 
@@ -390,7 +410,7 @@ fn write_csv(path: &Path, p: &Pacing, nits_frames: Option<&[NitsFrame]>) -> Resu
         write!(w, ",tear_y")?;
     }
     if nits_frames.is_some() {
-        write!(w, ",peak_nits,avg_nits,peak_luminance_nits,avg_luminance_nits")?;
+        write!(w, ",peak_nits,peak_nits_9999,ceiling_pixels,avg_nits,peak_luminance_nits,avg_luminance_nits")?;
     }
     writeln!(w)?;
     let capture: Vec<usize> = p.capture.iter().flat_map(|c| c.frames.iter().copied()).collect();
@@ -417,7 +437,11 @@ fn write_csv(path: &Path, p: &Pacing, nits_frames: Option<&[NitsFrame]>) -> Resu
             write!(w, ",{}", t[i].map(|y| y.to_string()).unwrap_or_default())?;
         }
         if let Some(f) = nits_frames.and_then(|n| n.get(i)) {
-            write!(w, ",{:.2},{:.2},{:.2},{:.2}", f.peak, f.avg, f.peak_lum, f.avg_lum)?;
+            write!(
+                w,
+                ",{:.2},{:.2},{},{:.2},{:.2},{:.2}",
+                f.peak, f.robust_peak, f.ceiling_pixels, f.avg, f.peak_lum, f.avg_lum
+            )?;
         }
         writeln!(w)?;
     }

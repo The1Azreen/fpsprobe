@@ -1326,5 +1326,6 @@ fn demo_nits(seed: usize, rng: &mut Lcg, peak: f32, avg: f32) -> NitsFrame {
         peak_lum: peak,
         avg_lum: avg,
         scopes: Some(ScopeData { wave: Some(wave), hist: Some(hist), cie: Some(cie), vec: Some(vec) }),
+        ..Default::default()
     }
 }
