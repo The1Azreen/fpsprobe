@@ -164,9 +164,14 @@ impl RunSummary {
             );
         }
         if self.low_motion_seconds > 0.0 {
+            let elsewhere = if self.min_1s_fps_with_motion.is_nan() {
+                "n/a (no full second of motion)".to_string()
+            } else {
+                format!("{:.2}", self.min_1s_fps_with_motion)
+            };
             out += &format!(
-                "low motion       {:.1} s barely changing (low FPS there may be a still scene); min 1s fps elsewhere {:.2}\n",
-                self.low_motion_seconds, self.min_1s_fps_with_motion
+                "low motion       {:.1} s barely changing (low FPS there may be a still scene); min 1s fps elsewhere {elsewhere}\n",
+                self.low_motion_seconds
             );
         }
         if let Some(t) = self.torn_frames {
