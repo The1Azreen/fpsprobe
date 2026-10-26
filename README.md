@@ -17,6 +17,14 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
   <img src="docs/media/overlay-fps-sdr.png" width="900" alt="Exported SDR gameplay of Miku dancing with FPS counter, FPS graph and frame-time graph">
 </p>
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=yJML7t_anxk">
+    <img src="docs/media/youtube-hdr-example.jpg" width="900" alt="Play the fpsprobe HDR example video on YouTube">
+  </a>
+  <br>
+  <a href="https://www.youtube.com/watch?v=yJML7t_anxk">Watch the HDR example on YouTube</a>
+</p>
+
 <!-- MEDIA: swap the image above for this GIF once docs/media/demo-overlay.gif exists (see docs/media/README.md)
 <p align="center">
   <img src="docs/media/demo-overlay.gif" width="900" alt="Gameplay with the fpsprobe FPS and frame-time overlay">

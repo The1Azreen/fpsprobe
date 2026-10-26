@@ -12,6 +12,7 @@ Screenshots and GIFs used by the main [README](../../README.md). Add each file w
 | `hdr-scopes-grid.png` | A frame from a graphs-only export using the "HDR scopes grid" preset, from an HDR recording. | 1920×1080 | to do |
 | `overlay-fps-hdr.png` | A frame from an exported video using the "FPS + HDR" preset. | 1920×1080 | done (header image until the GIF exists) |
 | `overlay-fps-sdr.png` | A frame from an SDR export with the default FPS and frame-time overlay. | 1920×1080 | done |
+| `youtube-hdr-example.jpg` | Thumbnail for the HDR example video on YouTube: a frame from an HDR export, tone-mapped to SDR, with a play button. | 1280×720 | done |
 
 Keep each file under about 10 MB. GitHub shows larger GIFs slowly or not at all.
 
