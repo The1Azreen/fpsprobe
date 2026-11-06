@@ -164,6 +164,72 @@ pub fn one_percent_lows(is_new: &[bool], timeline: &Timeline, keep: impl Fn(usiz
     (1.0 / p99, worst.len() as f64 / worst.iter().sum::<f64>())
 }
 
+/// A frame that came later than the target frame rate allows.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Hitch {
+    /// The frame shown too long, and when it appeared (seconds from the start).
+    pub frame: usize,
+    pub time_s: f64,
+    /// How long it stayed on screen.
+    pub frame_time_ms: f64,
+}
+
+/// How well a game holds the frame rate it runs at most of the time.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct TargetPacing {
+    /// The capture rate divided by the most common number of captured frames per
+    /// game frame: 30 for a game locked to 30 in a 60 Hz capture.
+    pub fps: f64,
+    /// Game frames considered.
+    pub frames: usize,
+    /// Frames that stayed on screen at least half a capture frame longer than the target allows.
+    pub late_frames: usize,
+    pub on_time_percent: f64,
+    /// The longest late frames, longest first.
+    pub worst: Vec<Hitch>,
+}
+
+/// Finds the target frame rate from the median frame time and measures the frames
+/// that missed it, over the intervals between new frames for which `keep(first,
+/// last)` holds. None when no interval is kept.
+pub fn target_pacing(
+    is_new: &[bool],
+    timeline: &Timeline,
+    keep: impl Fn(usize, usize) -> bool,
+    worst: usize,
+) -> Option<TargetPacing> {
+    let idx: Vec<usize> = (0..is_new.len()).filter(|&i| is_new[i]).collect();
+    let mut intervals: Vec<(usize, f64)> = idx
+        .windows(2)
+        .filter(|w| keep(w[0], w[1]))
+        .map(|w| (w[0], timeline.time(w[1]) - timeline.time(w[0])))
+        .collect();
+    if intervals.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<f64> = intervals.iter().map(|i| i.1).collect();
+    sorted.sort_by(f64::total_cmp);
+    let capture = timeline.fps;
+    let per_frame = (sorted[sorted.len() / 2] * capture).round().max(1.0);
+    let late_after = (per_frame + 0.5) / capture;
+
+    intervals.retain(|i| i.1 > late_after);
+    let late_frames = intervals.len();
+    // Longest first; equal ones in time order.
+    intervals.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    Some(TargetPacing {
+        fps: capture / per_frame,
+        frames: sorted.len(),
+        late_frames,
+        on_time_percent: 100.0 * (1.0 - late_frames as f64 / sorted.len() as f64),
+        worst: intervals
+            .iter()
+            .take(worst)
+            .map(|&(frame, dt)| Hitch { frame, time_s: timeline.time(frame), frame_time_ms: dt * 1000.0 })
+            .collect(),
+    })
+}
+
 /// Smallest non-NaN value, or NaN when there is none.
 pub fn min_ignoring_nan(values: impl Iterator<Item = f64>) -> f64 {
     values.filter(|v| !v.is_nan()).fold(f64::NAN, f64::min)
@@ -245,5 +311,26 @@ mod tests {
         let slots = t.slots(n);
         assert_eq!(slots[28], 28);
         assert_eq!(slots[29], 30);
+    }
+
+    #[test]
+    fn locked_thirty_with_two_hitches() {
+        // 30 in 60, except frames 398 and 798 stay up for 4 captured frames (66.7 ms).
+        let mut new = pattern(&[true, false], 1200);
+        new[400] = false;
+        new[800] = false;
+        let t = Timeline::constant(60.0);
+        let p = target_pacing(&new, &t, |_, _| true, 10).unwrap();
+        assert!((p.fps - 30.0).abs() < 1e-9);
+        assert_eq!(p.late_frames, 2);
+        assert_eq!((p.worst[0].frame, p.worst[1].frame), (398, 798));
+        assert!((p.worst[0].frame_time_ms - 66.667).abs() < 0.01);
+        assert!((p.worst[0].time_s - 398.0 / 60.0).abs() < 1e-9);
+        assert!((p.on_time_percent - 100.0 * (1.0 - 2.0 / 597.0)).abs() < 1e-9);
+        // Every frame new: a target of 60 with nothing late.
+        let t60 = target_pacing(&pattern(&[true], 600), &t, |_, _| true, 10).unwrap();
+        assert_eq!((t60.fps, t60.late_frames), (60.0, 0));
+        // Nothing kept: nothing to report.
+        assert!(target_pacing(&new, &t, |_, _| false, 10).is_none());
     }
 }

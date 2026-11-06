@@ -34,6 +34,7 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
 ## Features
 
 - **Frame rate and frame time** for compressed captures, with a noise-adaptive duplicate threshold. Reports average FPS, the lowest one-second FPS and two common "1% low" figures.
+- **Target frame rate and hitches:** finds the rate the game holds (such as a locked 30), the share of frames on time, and the longest late frames with timestamps to jump to.
 - **Capture-aware:**
   - finds repeated frames caused by the capture device's clock (for example 60 vs 59.94 Hz) and counts them as game frames
   - uses real frame timestamps for variable frame rate recordings
@@ -174,6 +175,7 @@ Run `fpsprobe.exe --help` for all options. Useful ones:
 - **Capture-clock repeats:** a capture device running slightly faster than the console shows one frame twice at a fixed interval (about every 16.7 s for 60 vs 59.94 Hz). fpsprobe finds that pattern and counts those frames as game frames. A device running slow instead skips frames, which can't be seen in the video.
 - **Two 1% lows:** "p99" is the frame rate at the 99th-percentile frame time; "avg" averages the slowest 1% of frame times, as many benchmark tools do. The avg figure reacts to a few hitches that the p99 figure can miss.
 - **Still scenes:** when the picture barely changes, repeated frames may just be a still image. The summary reports that time separately, along with the lowest one-second FPS and both 1% lows outside it, so menus and loading screens don't drag down the gameplay figures.
+- **Target and hitches:** the target is the capture rate divided by the most common number of captured frames per game frame (60 Hz capture, every other frame new: 30). A frame is late when it stays up at least half a capture frame longer than that. Still scenes are left out, but a menu you scroll through counts as motion, so its hitches can show up in the list.
 - **Tear detection is experimental.** It works on 64-pixel rows, so the tear line is approximate, and it ignores tears in the top and bottom fifth of the frame, where letterboxing and HUD strips look similar.
 
 fpsprobe is a free, open-source project and is not a certified measurement tool. Check its results before relying on them, especially in published comparisons.

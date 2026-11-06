@@ -8,7 +8,10 @@ use crate::layout::Layout;
 use crate::nits::{self, NitsFrame, NitsGpu, Transfer};
 use crate::progress::Progress;
 use crate::render::{self, Compare, EncoderCrashed, Output, RenderJob};
-use crate::timing::{self, PacingStats, Timeline};
+use crate::timing::{self, PacingStats, TargetPacing, Timeline};
+
+/// Late frames listed in the summary.
+const WORST_HITCHES: usize = 10;
 use crate::video::{self, VideoInfo};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -106,6 +109,9 @@ pub struct RunSummary {
     /// 1% lows over frame times that don't touch a low-motion stretch.
     pub low_1pct_p99_with_motion: f64,
     pub low_1pct_avg_with_motion: f64,
+    /// The frame rate the game holds most of the time (outside low-motion
+    /// stretches), and the frames that missed it.
+    pub target: Option<TargetPacing>,
     /// Torn frames (experimental), when tear detection ran.
     pub torn_frames: Option<usize>,
     pub nits: Option<NitsSummary>,
@@ -186,6 +192,27 @@ impl RunSummary {
                 );
             }
         }
+        if let Some(t) = &self.target {
+            out += &format!(
+                "target           {:.2} fps: {:.2}% of gameplay frames on time, {} late{}\n",
+                t.fps,
+                t.on_time_percent,
+                t.late_frames,
+                if self.low_motion_seconds > 0.0 { " (still scenes left out)" } else { "" }
+            );
+            for (i, h) in t.worst.iter().enumerate() {
+                let label = if i == 0 { "worst hitches" } else { "" };
+                let cs = (h.time_s * 100.0).round() as u64;
+                out += &format!(
+                    "{label:<17}{:>6.1} ms at {}:{:02}.{:02} (frame {})\n",
+                    h.frame_time_ms,
+                    cs / 6000,
+                    cs / 100 % 60,
+                    cs % 100,
+                    h.frame
+                );
+            }
+        }
         if let Some(t) = self.torn_frames {
             let pct = 100.0 * t as f64 / a.unique.max(1) as f64;
             out += &format!("torn frames      {t} ({pct:.2}% of new frames, experimental)\n");
@@ -249,8 +276,10 @@ impl Pacing {
         for (i, &l) in self.low_motion.iter().enumerate() {
             low_before[i + 1] = low_before[i] + l as usize;
         }
+        let with_motion = |a: usize, b: usize| low_before[b + 1] == low_before[a];
         let (low_1pct_p99_with_motion, low_1pct_avg_with_motion) =
-            timing::one_percent_lows(&self.is_new, &self.timeline, |a, b| low_before[b + 1] == low_before[a]);
+            timing::one_percent_lows(&self.is_new, &self.timeline, with_motion);
+        let target = timing::target_pacing(&self.is_new, &self.timeline, with_motion, WORST_HITCHES);
         RunSummary {
             input: input.to_path_buf(),
             width: self.info.width,
@@ -275,6 +304,7 @@ impl Pacing {
             min_1s_fps_with_motion,
             low_1pct_p99_with_motion,
             low_1pct_avg_with_motion,
+            target,
             torn_frames: self.tears.as_ref().map(|t| t.iter().flatten().count()),
             nits: None,
             compare: None,

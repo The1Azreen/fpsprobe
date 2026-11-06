@@ -3,10 +3,11 @@
 use crate::nits::ColorInfo;
 use anyhow::{Context, Result, bail};
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
 #[derive(Clone, Debug)]
@@ -228,16 +229,33 @@ pub fn spawn_decoder(
         .args(["-f", "rawvideo", "-pix_fmt", pix_fmt, "-"]);
     let mut child = cmd
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to run ffmpeg (is FFmpeg installed and on PATH?)")?;
     let mut stdout = child.stdout.take().unwrap();
+    // Set once the frames are no longer wanted: FFmpeg then fails to write to the
+    // closed pipe and says so, which is expected and not worth showing.
+    let stopped = Arc::new(AtomicBool::new(false));
+    if let Some(stderr) = child.stderr.take() {
+        let stopped = stopped.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
+                if !stopped.load(Ordering::SeqCst) {
+                    eprintln!("{line}");
+                }
+            }
+        });
+    }
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(8);
     std::thread::spawn(move || {
         loop {
             let mut buf = vec![0u8; frame_bytes];
-            if stdout.read_exact(&mut buf).is_err() || tx.send(buf).is_err() {
+            if stdout.read_exact(&mut buf).is_err() {
                 break;
+            }
+            if tx.send(buf).is_err() {
+                stopped.store(true, Ordering::SeqCst);
+                break; // closing stdout here is what makes FFmpeg complain
             }
         }
     });
