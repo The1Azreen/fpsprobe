@@ -111,6 +111,61 @@ struct Args {
     resolution_only: bool,
 }
 
+/// Prints each stage as it starts until the job drops its handle on `progress`.
+/// On a terminal the current stage's line also counts frames, with speed and
+/// time left, redrawn in place.
+fn watch(progress: &Arc<Progress>) {
+    use std::io::{IsTerminal, Write};
+    use std::time::{Duration, Instant};
+    let live = std::io::stderr().is_terminal();
+    let mut last = String::new();
+    let mut started = Instant::now();
+    let mut width = 0;
+    let mut tick = 0u32;
+    let finish_line = |width: &mut usize| {
+        if *width > 0 {
+            eprintln!();
+            *width = 0;
+        }
+    };
+    while Arc::strong_count(progress) > 1 {
+        let (stage, done, total) = progress.snapshot();
+        if stage != last && !stage.is_empty() {
+            finish_line(&mut width);
+            if !live {
+                eprintln!("{stage}...");
+            }
+            last = stage.clone();
+            started = Instant::now();
+        }
+        tick += 1;
+        if live && !stage.is_empty() && tick.is_multiple_of(5) {
+            let secs = started.elapsed().as_secs_f64();
+            let rate = done as f64 / secs.max(1e-3);
+            let mut line = format!("{stage}: {done}");
+            if total > 0 {
+                line += &format!("/{total} frames ({:.0}%)", 100.0 * done.min(total) as f64 / total as f64);
+            } else {
+                line += " frames";
+            }
+            if done > 0 {
+                line += &format!(", {rate:.0} fps");
+                if total > done {
+                    let left = ((total - done) as f64 / rate) as u64;
+                    line += &format!(", {}:{:02} left", left / 60, left % 60);
+                }
+            }
+            // Spaces wipe what a longer previous line left behind.
+            let pad = width.saturating_sub(line.len());
+            eprint!("\r{line}{}", " ".repeat(pad));
+            let _ = std::io::stderr().flush();
+            width = line.len();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    finish_line(&mut width);
+}
+
 fn parse_rect(s: &str) -> Result<[usize; 4], String> {
     let v: Vec<usize> = s.split(',').map(|p| p.trim().parse()).collect::<Result<_, _>>().map_err(|e| format!("{e}"))?;
     v.try_into().map_err(|_| "expected x,y,w,h".to_string())
@@ -174,21 +229,11 @@ fn main() -> Result<()> {
         ..ExportJob::new(args.input)
     };
 
-    // Report each stage as it starts.
+    // Report each stage as it starts; in a terminal, also a live frame count.
     let progress = Arc::new(Progress::default());
     let watcher = {
         let progress = progress.clone();
-        std::thread::spawn(move || {
-            let mut last = String::new();
-            while Arc::strong_count(&progress) > 1 {
-                let (stage, _, _) = progress.snapshot();
-                if stage != last && !stage.is_empty() {
-                    eprintln!("{stage}...");
-                    last = stage;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        })
+        std::thread::spawn(move || watch(&progress))
     };
     let report = export::run(&job, &progress);
     drop(progress);

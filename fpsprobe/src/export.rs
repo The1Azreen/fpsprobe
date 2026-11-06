@@ -3,8 +3,9 @@
 
 use crate::analyze::{self, Analysis, DiffOptions, FrameScore, Geometry};
 use crate::cadence::{self, CaptureDrops};
+use crate::hdrmeta;
 use crate::layout::Layout;
-use crate::nits::{self, NitsFrame, NitsGpu};
+use crate::nits::{self, NitsFrame, NitsGpu, Transfer};
 use crate::progress::Progress;
 use crate::render::{self, Compare, EncoderCrashed, Output, RenderJob};
 use crate::timing::{self, PacingStats, Timeline};
@@ -102,6 +103,9 @@ pub struct RunSummary {
     pub low_motion_seconds: f64,
     /// Lowest one-second FPS outside low-motion stretches.
     pub min_1s_fps_with_motion: f64,
+    /// 1% lows over frame times that don't touch a low-motion stretch.
+    pub low_1pct_p99_with_motion: f64,
+    pub low_1pct_avg_with_motion: f64,
     /// Torn frames (experimental), when tear detection ran.
     pub torn_frames: Option<usize>,
     pub nits: Option<NitsSummary>,
@@ -166,15 +170,21 @@ impl RunSummary {
             );
         }
         if self.low_motion_seconds > 0.0 {
-            let elsewhere = if self.min_1s_fps_with_motion.is_nan() {
-                "n/a (no full second of motion)".to_string()
-            } else {
-                format!("{:.2}", self.min_1s_fps_with_motion)
-            };
             out += &format!(
-                "low motion       {:.1} s barely changing (low FPS there may be a still scene); min 1s fps elsewhere {elsewhere}\n",
+                "low motion       {:.1} s barely changing (low FPS there may be a still scene)\n",
                 self.low_motion_seconds
             );
+            let num = |v: f64| if v.is_nan() { "n/a".to_string() } else { format!("{v:.2}") };
+            if self.min_1s_fps_with_motion.is_nan() && self.low_1pct_p99_with_motion.is_nan() {
+                out += "  outside it     n/a (no full second of motion)\n";
+            } else {
+                out += &format!(
+                    "  outside it     min 1s fps {}, 1% low (p99) {}, 1% low (avg) {}\n",
+                    num(self.min_1s_fps_with_motion),
+                    num(self.low_1pct_p99_with_motion),
+                    num(self.low_1pct_avg_with_motion)
+                );
+            }
         }
         if let Some(t) = self.torn_frames {
             let pct = 100.0 * t as f64 / a.unique.max(1) as f64;
@@ -234,6 +244,13 @@ impl Pacing {
         let (series, _) = self.timeline.fps_series(&self.is_new);
         let min_1s_fps_with_motion =
             timing::min_ignoring_nan(series.iter().zip(&self.low_motion).filter(|(_, low)| !**low).map(|(f, _)| *f));
+        // low_before[i]: low-motion frames before frame i, so each interval checks in O(1).
+        let mut low_before = vec![0usize; self.low_motion.len() + 1];
+        for (i, &l) in self.low_motion.iter().enumerate() {
+            low_before[i + 1] = low_before[i] + l as usize;
+        }
+        let (low_1pct_p99_with_motion, low_1pct_avg_with_motion) =
+            timing::one_percent_lows(&self.is_new, &self.timeline, |a, b| low_before[b + 1] == low_before[a]);
         RunSummary {
             input: input.to_path_buf(),
             width: self.info.width,
@@ -256,6 +273,8 @@ impl Pacing {
             }),
             low_motion_seconds: self.low_motion.iter().filter(|&&l| l).count() as f64 / self.info.fps,
             min_1s_fps_with_motion,
+            low_1pct_p99_with_motion,
+            low_1pct_avg_with_motion,
             torn_frames: self.tears.as_ref().map(|t| t.iter().flatten().count()),
             nits: None,
             compare: None,
@@ -418,6 +437,22 @@ pub fn run(job: &ExportJob, progress: &Progress) -> Result<ExportReport> {
     let mut summary = stats.text();
     if let Some(note) = encoder_note {
         summary += &note;
+    }
+    // HDR10 light-level metadata for the rendered video, from this measurement.
+    if let (Some(path), Some(n), Transfer::Pq) = (&job.video, &stats.nits, info.color.transfer) {
+        // The 99.99% figure: the strict MaxCLL is often a few stray pixels, and
+        // displays tone-map the whole picture down to make room for it. The graphs
+        // reach graphics white at most.
+        let max_cll = n.max_cll_robust.max(render::HDR_GRAPHICS_WHITE);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let written = matches!(ext.as_str(), "mp4" | "mov" | "m4v")
+            && hdrmeta::write_content_light_level(path, max_cll, n.max_fall)
+                .context("writing HDR metadata into the rendered video")?;
+        summary += &if written {
+            format!("HDR metadata     MaxCLL {max_cll:.0}, MaxFALL {:.0} written into the video\n", n.max_fall)
+        } else {
+            "HDR metadata     not written (only HEVC in .mp4 / .mov is supported)\n".to_string()
+        };
     }
     if let Some(s) = render_seconds {
         summary += &format!("rendered in {s:.1}s\n");

@@ -59,6 +59,18 @@ pub fn probe(path: &Path) -> Result<VideoInfo> {
     })
 }
 
+/// Codec of the first audio stream (FFmpeg's name, such as "aac"), or None
+/// without audio.
+pub fn audio_codec(path: &Path) -> Option<String> {
+    let out = command("ffprobe")
+        .args(["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Reads the presentation time of every video frame from packet timestamps
 /// (demuxing only, no decoding) in the background. Dropping it stops ffprobe.
 pub struct FrameTimes {

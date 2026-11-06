@@ -10,6 +10,7 @@ pub mod canvas;
 pub mod composite;
 pub mod export;
 mod gpu;
+pub mod hdrmeta;
 pub mod layout;
 pub mod nits;
 pub mod preview;

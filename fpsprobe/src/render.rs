@@ -24,7 +24,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
 /// Nits that panel white maps to in HDR output (BT.2408 graphics white).
-const HDR_GRAPHICS_WHITE: f32 = 203.0;
+pub const HDR_GRAPHICS_WHITE: f32 = 203.0;
 /// Frames queued between drawing, compositing and FFmpeg's stdin.
 const WRITE_QUEUE: usize = 4;
 
@@ -276,14 +276,20 @@ fn video_sink(job: &RenderJob, path: &Path, encoder: Option<&str>, frames_out: u
     let tags = ["-color_primaries", primaries, "-color_trc", trc, "-colorspace", matrix, "-color_range", range];
 
     let mut cmd = video::command("ffmpeg");
-    cmd.args(["-v", "error", "-stats", "-y", "-f", "rawvideo", "-pix_fmt", "p010le", "-s"])
+    cmd.args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "p010le", "-s"])
         .arg(format!("{dw}x{dh}"))
         .args(["-framerate", &info.fps.to_string()]);
     // Tagging the raw input too keeps FFmpeg from converting every frame's colours
     // in software (5x slower, and a needless conversion).
     cmd.args(tags).args(["-i", "-"]);
     cmd.arg("-i").arg(job.input);
-    cmd.args(["-map", "0:v", "-map", "1:a?", "-c:a", "aac", "-b:a", "256k"]);
+    cmd.args(["-map", "0:v", "-map", "1:a?"]);
+    // The audio is copied as is when the output container takes it; else AAC.
+    if audio_copies(job.input, path) {
+        cmd.args(["-c:a", "copy"]);
+    } else {
+        cmd.args(["-c:a", "aac", "-b:a", "256k"]);
+    }
     // Encoders need even sizes; padding added for decoding is cropped off again.
     let (ow, oh) = (info.width / 2 * 2, info.height / 2 * 2);
     if (ow, oh) != (dw, dh) {
@@ -308,6 +314,17 @@ fn video_sink(job: &RenderJob, path: &Path, encoder: Option<&str>, frames_out: u
     let mut sink = Sink::spawn(cmd, label, canvas, Some(compositor))?;
     sink.hw_encoder = (!encoder.starts_with("lib")).then_some(encoder);
     Ok(sink)
+}
+
+/// Whether the source's audio can be copied into `output` without re-encoding:
+/// AAC goes into any container FFmpeg writes here; Matroska takes nearly anything.
+fn audio_copies(input: &Path, output: &Path) -> bool {
+    let ext = output.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    match video::audio_codec(input).as_deref() {
+        None => true, // no audio: nothing to encode
+        Some("aac") => true,
+        Some(_) => ext == "mkv",
+    }
 }
 
 fn graphs_sink(job: &RenderJob, path: &Path, width: usize, height: usize, frames_out: usize) -> Result<Sink> {
@@ -400,10 +417,13 @@ fn describe_exit(status: std::process::ExitStatus) -> String {
 }
 
 /// Renders all requested outputs in one pass. Returns per-frame nits (without
-/// scope data) when the layout needed them.
+/// scope data) when they were measured: when the layout shows them, and for PQ
+/// videos with graphs, whose light-level metadata needs them.
 pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFrame>>> {
     let info = job.info;
-    let wants_nits = job.layout.needs_nits();
+    let pq_video =
+        info.color.transfer == Transfer::Pq && job.outputs.iter().any(|o| matches!(o, Output::Overlay { .. }));
+    let wants_nits = job.layout.needs_nits() || pq_video;
     // Outputs run at the nominal rate; with a variable frame rate a source frame can
     // cover several output frames (or none), so frames are drawn per output slot.
     let slots = job.timeline.slots(job.frames());
@@ -442,7 +462,8 @@ pub fn render(job: &RenderJob, progress: &Progress) -> Result<Option<Vec<NitsFra
                 let src = source.as_ref().and_then(|(frames, _)| frames.recv().ok());
                 let (nf, yuv) = src.map_or((None, None), |s| (s.nits, s.yuv));
                 if let Some(f) = &nf {
-                    max_cll = max_cll.max(f.peak);
+                    // The robust figure: the strict one is often a few stray pixels.
+                    max_cll = max_cll.max(f.robust_peak);
                 }
                 peak_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.peak_lum as f64));
                 avg_hist.push(nf.as_ref().map_or(f64::NAN, |f| f.avg_lum as f64));

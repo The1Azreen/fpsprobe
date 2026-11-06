@@ -27,6 +27,7 @@ pub struct FrameData<'a> {
     /// Per-frame luminance peak / average in nits (NaN = not measured).
     pub peak_history: &'a [f64],
     pub avg_history: &'a [f64],
+    /// MaxCLL so far, ignoring the brightest 0.01% of each frame (see `NitsFrame::robust_peak`).
     pub max_cll: f32,
     /// Source video pixel count (normalizes scope densities).
     pub source_pixels: f32,
@@ -284,7 +285,7 @@ impl Canvas {
         };
         self.text(&format!("PEAK {:.0}", n.peak_lum), r.x + 20.0 * s, base, 44.0 * s, [255, 230, 120]);
         self.text(&format!("AVG {:.0} nits", n.avg_lum), r.x + 260.0 * s, base, 30.0 * s, [120, 220, 255]);
-        self.text(&format!("MaxCLL {:.0}", d.max_cll), r.x + r.w - 170.0 * s, base, 22.0 * s, [150, 150, 150]);
+        self.text(&format!("MaxCLL {:.0} (99.99%)", d.max_cll), r.x + r.w - 250.0 * s, base, 22.0 * s, [150, 150, 150]);
     }
 
     fn nits_graph(&mut self, r: Rect, s: f32, w: &Widget, d: &FrameData) {

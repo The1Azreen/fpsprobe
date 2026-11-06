@@ -137,16 +137,7 @@ impl PacingStats {
         let (fps, _) = timeline.fps_series(is_new);
         let min_1s_fps = min_ignoring_nan(fps.iter().copied());
 
-        let idx: Vec<usize> = (0..is_new.len()).filter(|&i| is_new[i]).collect();
-        let mut ft: Vec<f64> = idx.windows(2).map(|w| timeline.time(w[1]) - timeline.time(w[0])).collect();
-        ft.sort_by(f64::total_cmp);
-        let (low_1pct_p99, low_1pct_avg) = if ft.is_empty() {
-            (f64::NAN, f64::NAN)
-        } else {
-            let p99 = ft[((ft.len() as f64 * 0.99).ceil() as usize).clamp(1, ft.len()) - 1];
-            let worst = &ft[ft.len() - (ft.len() as f64 * 0.01).ceil().max(1.0) as usize..];
-            (1.0 / p99, worst.len() as f64 / worst.iter().sum::<f64>())
-        };
+        let (low_1pct_p99, low_1pct_avg) = one_percent_lows(is_new, timeline, |_, _| true);
         Self {
             unique,
             avg_fps: unique as f64 / timeline.duration(is_new.len()),
@@ -155,6 +146,22 @@ impl PacingStats {
             low_1pct_avg,
         }
     }
+}
+
+/// The two 1% lows (p99 and average of the slowest 1%) over the frame times
+/// between consecutive new frames, keeping only intervals for which `keep(first,
+/// last)` holds. NaN when no interval is kept.
+pub fn one_percent_lows(is_new: &[bool], timeline: &Timeline, keep: impl Fn(usize, usize) -> bool) -> (f64, f64) {
+    let idx: Vec<usize> = (0..is_new.len()).filter(|&i| is_new[i]).collect();
+    let mut ft: Vec<f64> =
+        idx.windows(2).filter(|w| keep(w[0], w[1])).map(|w| timeline.time(w[1]) - timeline.time(w[0])).collect();
+    if ft.is_empty() {
+        return (f64::NAN, f64::NAN);
+    }
+    ft.sort_by(f64::total_cmp);
+    let p99 = ft[((ft.len() as f64 * 0.99).ceil() as usize).clamp(1, ft.len()) - 1];
+    let worst = &ft[ft.len() - (ft.len() as f64 * 0.01).ceil().max(1.0) as usize..];
+    (1.0 / p99, worst.len() as f64 / worst.iter().sum::<f64>())
 }
 
 /// Smallest non-NaN value, or NaN when there is none.

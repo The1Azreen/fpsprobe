@@ -121,6 +121,58 @@ fn torn_frames_are_detected() {
     assert_eq!(s.torn_frames, Some(20));
 }
 
+fn probe(path: &PathBuf, args: &[&str]) -> String {
+    let out = Command::new("ffprobe").args(["-v", "error"]).args(args).arg(path).output().expect("run ffprobe");
+    String::from_utf8_lossy(&out.stdout).trim().trim_end_matches(',').to_string()
+}
+
+#[test]
+fn hdr_render_keeps_every_frame_and_gets_light_levels() {
+    if !ffmpeg_available() {
+        return;
+    }
+    // Two seconds of 60 fps HDR10 (PQ) video with AAC audio.
+    let dir = std::env::temp_dir().join(format!("fpsprobe-test-hdr-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = dir.join("hdr.mp4");
+    let ok = Command::new("ffmpeg")
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x192:r=60:d=2"])
+        .args(["-f", "lavfi", "-i", "sine=d=2", "-c:v", "libx265", "-x265-params", "log-level=error"])
+        // testsrc2 tags its frames itself, so the HDR tags go on the frames.
+        .args(["-vf", "setparams=color_trc=smpte2084:color_primaries=bt2020:colorspace=bt2020nc"])
+        .args(["-pix_fmt", "yuv420p10le", "-c:a", "aac"])
+        .arg(&clip)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("ffmpeg without libx265; skipping");
+        return;
+    }
+    let out = dir.join("out.mp4");
+    let job = ExportJob {
+        use_gpu: false,
+        hwaccel: None,
+        video: Some(out.clone()),
+        encoder: Some("libx265".into()),
+        ..ExportJob::new(clip.clone())
+    };
+    let report = export::run(&job, &Progress::default()).expect("export");
+    let frames = probe(
+        &out,
+        &["-select_streams", "v:0", "-count_packets", "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0"],
+    );
+    let audio = probe(&out, &["-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]);
+    let side_data = probe(&out, &["-select_streams", "v:0", "-show_entries", "stream_side_data", "-of", "default"]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(frames, "120", "every source frame is rendered");
+    assert_eq!(audio, "aac");
+    let nits = report.stats.nits.expect("HDR renders measure nits");
+    let cll = nits.max_cll_robust.max(203.0).round() as u32;
+    assert!(side_data.contains(&format!("max_content={cll}")), "{side_data}");
+    assert!(side_data.contains(&format!("max_average={}", nits.max_fall.round() as u32)), "{side_data}");
+}
+
 #[test]
 fn render_after_cancelled_render() {
     if !ffmpeg_available() {

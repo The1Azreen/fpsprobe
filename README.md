@@ -40,11 +40,11 @@ fpsprobe is built for real-world console captures, such as HEVC recordings from 
   - flags still scenes, where a low frame rate says nothing about performance
 - **Comparisons:** draw a second capture's FPS and frame time on the same graphs, for example two consoles.
 - **GPU processing:** hardware video decode through FFmpeg (picked automatically: D3D11VA, CUDA, QSV, VAAPI, VideoToolbox or Vulkan) and frame comparison in a `wgpu` compute shader.
-- **HDR brightness:** HDR10 (PQ), HLG and SDR. Reports peak and average luminance in nits, plus MaxCLL and MaxFALL.
+- **HDR brightness:** HDR10 (PQ), HLG and SDR. Reports peak and average luminance in nits, plus MaxCLL and MaxFALL. Rendered HDR10 videos get the measured MaxCLL/MaxFALL as their HDR metadata.
 - **HDR scopes:** RGB waveform in nits, L/R/G/B histogram, CIE 1931 chromaticity with Rec.709, P3 and Rec.2020 outlines, and a vectorscope.
 - **Exports:**
   - CSV with per-frame data, and a JSON summary
-  - the video with the graphs on top (HDR sources stay HDR10)
+  - the video with the graphs on top (HDR sources stay HDR10; the audio is copied unchanged when the container allows)
   - the graphs alone as ProRes 4444 with transparency, for DaVinci Resolve and other editors
 - **GUI layout editor:** switch graphs on or off, then drag and resize them over a real frame of your video, chosen with a slider. Snap to a grid or align graphs to each other, nudge with the arrow keys, and lock graphs in place. Layouts save to JSON and can be reused from the command line.
 - **Internal resolution detection (experimental):** estimates the game's rendering resolution for retro, interlaced and modern sources. See [below](#internal-resolution-detection-experimental-wip).
@@ -170,9 +170,10 @@ Run `fpsprobe.exe --help` for all options. Useful ones:
 - **Frame times are limited by the capture rate.** At 60 Hz they are always multiples of 16.7 ms, so record at 120 Hz for finer detail.
 - **Nits come from the video signal, not from your display.** fpsprobe reports what the console sent; your TV may tone-map or clip it.
 - **MaxCLL uses the brightest single colour channel,** following its CTA-861.3 definition, so it is usually much higher than the peak luminance.
+- **Two MaxCLL figures:** the strict one is often set by a handful of stray pixels at the top of the signal range. The summary also gives a "99.99%" figure that ignores the brightest 0.01% of each frame's pixels. The graphs show that figure, and so does the HDR metadata written into rendered videos (.mp4 and .mov), because displays tone-map the whole picture to fit MaxCLL.
 - **Capture-clock repeats:** a capture device running slightly faster than the console shows one frame twice at a fixed interval (about every 16.7 s for 60 vs 59.94 Hz). fpsprobe finds that pattern and counts those frames as game frames. A device running slow instead skips frames, which can't be seen in the video.
 - **Two 1% lows:** "p99" is the frame rate at the 99th-percentile frame time; "avg" averages the slowest 1% of frame times, as many benchmark tools do. The avg figure reacts to a few hitches that the p99 figure can miss.
-- **Still scenes:** when the picture barely changes, repeated frames may just be a still image. The summary reports that time separately, along with the lowest one-second FPS outside it.
+- **Still scenes:** when the picture barely changes, repeated frames may just be a still image. The summary reports that time separately, along with the lowest one-second FPS and both 1% lows outside it, so menus and loading screens don't drag down the gameplay figures.
 - **Tear detection is experimental.** It works on 64-pixel rows, so the tear line is approximate, and it ignores tears in the top and bottom fifth of the frame, where letterboxing and HUD strips look similar.
 
 fpsprobe is a free, open-source project and is not a certified measurement tool. Check its results before relying on them, especially in published comparisons.
